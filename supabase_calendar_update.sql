@@ -3,8 +3,7 @@ alter table public.tasks add column if not exists start_time time;
 alter table public.tasks add column if not exists end_time time;
 alter table public.tasks add column if not exists block text default '';
 
--- Оставляем только участников нового формата.
--- Старые задачи с другими ответственными будут перенесены на Алису.
+-- Переименование старого участника. Новые сотрудники теперь управляются из дашборда.
 update public.tasks
-set owner = 'Алиса'
-where owner not in ('Алиса', 'Таня', 'Аня', 'Виктория');
+set owner = 'Саша'
+where owner = 'Алиса';
