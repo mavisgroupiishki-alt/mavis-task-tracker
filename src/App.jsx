@@ -64,6 +64,12 @@ const PROJECT_COLORS = ['#7c3aed', '#2563eb', '#059669', '#ea580c', '#db2777', '
 const TASK_STATUSES = ['Ожидает', 'Новая', 'В работе', 'На проверке', 'Блокер', 'Готово'];
 const PROJECT_STATUSES = ['Ожидает', 'В работе', 'На паузе', 'Готово'];
 const PRIORITIES = ['Низкий', 'Средний', 'Высокий'];
+const COMPLETED_TASK_STATUSES = new Set(['готово', 'сделано', 'выполнено', 'завершено', 'закрыто']);
+
+function isTaskCompleted(taskOrStatus) {
+  const status = typeof taskOrStatus === 'string' ? taskOrStatus : taskOrStatus?.status;
+  return COMPLETED_TASK_STATUSES.has(String(status || '').trim().toLowerCase());
+}
 
 function todayIso() {
   const now = new Date();
@@ -783,12 +789,12 @@ export default function App() {
     const weekStart = getWeekStart(selectedDate);
     const weekEnd = addDays(weekStart, 6);
     return filteredTasks
-      .filter((task) => isWithinRange(task.deadline, weekStart, weekEnd))
+      .filter((task) => !isTaskCompleted(task) && isWithinRange(task.deadline, weekStart, weekEnd))
       .map((task) => ({ ...task, color: employees.find((employee) => employee.name === task.owner)?.color || '#7c3aed' }));
   }, [filteredTasks, selectedDate, employees]);
 
   const unscheduledCalendarTasks = useMemo(() => filteredTasks
-    .filter((task) => !task.start_time || !task.end_time)
+    .filter((task) => !isTaskCompleted(task) && (!task.start_time || !task.end_time))
     .sort((a, b) => String(a.deadline || '').localeCompare(String(b.deadline || '')))
     .map((task) => ({ ...task, color: employees.find((employee) => employee.name === task.owner)?.color || '#7c3aed' })), [filteredTasks, employees]);
 
