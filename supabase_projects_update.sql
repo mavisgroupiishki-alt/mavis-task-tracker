@@ -47,10 +47,17 @@ create trigger project_stages_set_updated_at
 before update on public.project_stages
 for each row execute function public.set_updated_at();
 
--- 3. Привязка существующих задач к проектам/этапам и комментарий
+-- 3. Привязка существующих задач к проектам/этапам, комментарий и рабочая ссылка
 alter table public.tasks add column if not exists project_id uuid references public.projects(id) on delete set null;
 alter table public.tasks add column if not exists stage_id uuid references public.project_stages(id) on delete set null;
 alter table public.tasks add column if not exists comment text not null default '';
+alter table public.tasks add column if not exists resource_url text not null default '';
+
+-- Если в старом комментарии уже была ссылка, переносим первую найденную ссылку в отдельное поле.
+update public.tasks
+set resource_url = (regexp_match(comment, '(https?://[^\s]+)'))[1]
+where coalesce(resource_url, '') = ''
+  and comment ~ '(https?://[^\s]+)';
 
 -- Алиса в старых данных становится Сашей
 update public.tasks set owner = 'Саша' where owner = 'Алиса';

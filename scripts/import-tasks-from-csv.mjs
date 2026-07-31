@@ -67,6 +67,8 @@ const payload = lines.slice(1).map((line) => {
     status: get(row, ['status', 'статус'], 'Новая'),
     priority: get(row, ['priority', 'приоритет'], 'Средний'),
     hours: Number(String(get(row, ['hours', 'часы', 'загрузка'], '1')).replace(',', '.')),
+    comment: get(row, ['comment', 'комментарий'], ''),
+    resource_url: get(row, ['resource_url', 'ссылка', 'ссылка на материалы', 'материалы', 'url'], ''),
     result: get(row, ['result', 'результат', 'измеримый результат'], ''),
   };
 });

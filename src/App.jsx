@@ -14,18 +14,23 @@ import {
   ChevronUp,
   Clock,
   Database,
+  Download,
   Edit3,
+  ExternalLink,
   FileUp,
   FolderKanban,
   FolderPlus,
+  GripVertical,
   History,
   Layers3,
+  Link2,
   List,
   ListChecks,
   MessageSquare,
   Plus,
   RefreshCw,
   Search,
+  ShieldCheck,
   Sparkles,
   Trash2,
   UserPlus,
@@ -37,7 +42,7 @@ import { Bar, BarChart, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from 
 import { createClient } from '@supabase/supabase-js';
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
-const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
+const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
 const supabase = SUPABASE_URL && SUPABASE_ANON_KEY ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
 
 const TASKS_STORAGE_KEY = 'mavis_task_tracker_local_backup_v3';
@@ -45,6 +50,7 @@ const EMPLOYEES_STORAGE_KEY = 'mavis_task_tracker_employees_v1';
 const PROJECTS_STORAGE_KEY = 'mavis_task_tracker_projects_v1';
 const STAGES_STORAGE_KEY = 'mavis_task_tracker_project_stages_v1';
 const RESCHEDULES_STORAGE_KEY = 'mavis_task_tracker_reschedules_v1';
+const CALENDAR_BACKUPS_STORAGE_KEY = 'mavis_task_tracker_calendar_backups_v1';
 
 const DEFAULT_EMPLOYEES = [
   { id: 'default-sasha', name: 'Саша', role: 'Руководитель отдела продаж', color: '#7c3aed' },
@@ -124,6 +130,32 @@ function toMinutes(value) {
   return hours * 60 + minutes;
 }
 
+function minutesToTime(value) {
+  const minutes = Math.max(0, Math.min(23 * 60 + 59, Math.round(Number(value) || 0)));
+  return `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
+}
+
+function taskDurationMinutes(task) {
+  const start = toMinutes(task?.start_time);
+  const end = toMinutes(task?.end_time);
+  if (start != null && end != null && end > start) return end - start;
+  return 60;
+}
+
+function createSafetySnapshot(tasks, reason = 'calendar-change') {
+  try {
+    const previous = parseLocal(CALENDAR_BACKUPS_STORAGE_KEY, []);
+    const snapshot = {
+      created_at: new Date().toISOString(),
+      reason,
+      tasks,
+    };
+    localStorage.setItem(CALENDAR_BACKUPS_STORAGE_KEY, JSON.stringify([snapshot, ...previous].slice(0, 5)));
+  } catch {
+    // Резервная копия не должна блокировать основное действие.
+  }
+}
+
 function hoursBetween(start, end) {
   const startMinutes = toMinutes(start);
   const endMinutes = toMinutes(end);
@@ -139,6 +171,30 @@ function normalizeOwner(value) {
   const name = String(value || '').trim();
   if (name === 'Алиса') return 'Саша';
   return name || 'Саша';
+}
+
+function normalizeResourceUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const candidate = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+  try {
+    const parsed = new URL(candidate);
+    return ['http:', 'https:'].includes(parsed.protocol) ? parsed.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+function resourceLabel(value) {
+  try {
+    const host = new URL(value).hostname.replace(/^www\./, '');
+    if (host.includes('docs.google.com')) return 'Открыть Google-документ';
+    if (host.includes('drive.google.com')) return 'Открыть Google Drive';
+    if (host.includes('miro.com')) return 'Открыть Miro';
+    return `Открыть ${host}`;
+  } catch {
+    return 'Открыть материал';
+  }
 }
 
 function normalizeEmployee(employee, index = 0) {
@@ -195,6 +251,7 @@ function normalizeTask(task) {
     block: task.block || '',
     result: task.result || '',
     comment: task.comment || '',
+    resource_url: normalizeResourceUrl(task.resource_url || task.resourceUrl || '') || '',
     project_id: task.project_id || null,
     stage_id: task.stage_id || null,
     created_at: task.created_at || new Date().toISOString(),
@@ -281,6 +338,7 @@ function emptyTaskForm(selectedDate, owner, projectId = '', stageId = '') {
     block: '',
     result: '',
     comment: '',
+    resource_url: '',
     project_id: projectId || '',
     stage_id: stageId || '',
   };
@@ -351,7 +409,25 @@ function ProgressBar({ value, color = '#7c3aed' }) {
   );
 }
 
-function WeekCalendar({ tasks, selectedDate, onEditTask }) {
+function TaskResourceLink({ url, compact = false }) {
+  if (!url) return null;
+  return (
+    <a
+      href={url}
+      target="_blank"
+      rel="noreferrer noopener"
+      onClick={(event) => event.stopPropagation()}
+      className={`inline-flex items-center gap-1.5 rounded-xl bg-sky-50 font-medium text-sky-700 hover:bg-sky-100 ${compact ? 'mt-1 px-2 py-1 text-xs' : 'px-3 py-2 text-sm'}`}
+      title={url}
+    >
+      <Link2 className={compact ? 'h-3.5 w-3.5' : 'h-4 w-4'} />
+      <span className="max-w-[260px] truncate">{resourceLabel(url)}</span>
+      <ExternalLink className={compact ? 'h-3 w-3' : 'h-3.5 w-3.5'} />
+    </a>
+  );
+}
+
+function WeekCalendar({ tasks, unscheduledTasks, selectedDate, onEditTask, onMoveTask }) {
   const start = getWeekStart(selectedDate);
   const days = Array.from({ length: 7 }, (_, index) => addDays(start, index));
   const startHour = 8;
@@ -360,76 +436,196 @@ function WeekCalendar({ tasks, selectedDate, onEditTask }) {
   const totalRows = (endHour - startHour) * 2;
   const gridHeight = totalRows * rowHeight;
   const timedTasks = tasks.filter((task) => task.start_time && task.end_time);
-  const noTimeTasks = tasks.filter((task) => !task.start_time || !task.end_time);
+  const [draggedTaskId, setDraggedTaskId] = useState(null);
+  const [dropPreview, setDropPreview] = useState(null);
+  const [removeTimeActive, setRemoveTimeActive] = useState(false);
+
+  function startDragging(event, task) {
+    setDraggedTaskId(String(task.id));
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', String(task.id));
+  }
+
+  function finishDragging() {
+    setDraggedTaskId(null);
+    setDropPreview(null);
+    setRemoveTimeActive(false);
+  }
+
+  function getDraggedTask(event) {
+    const taskId = event.dataTransfer.getData('text/plain') || draggedTaskId;
+    return [...tasks, ...unscheduledTasks].find((task) => String(task.id) === String(taskId));
+  }
+
+  function calculateDropTime(event) {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const y = Math.max(0, Math.min(rect.height - 1, event.clientY - rect.top));
+    const slotIndex = Math.max(0, Math.min(totalRows - 1, Math.floor(y / rowHeight)));
+    return startHour * 60 + slotIndex * 30;
+  }
+
+  function handleDragOverDay(event, day) {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+    const task = getDraggedTask(event);
+    if (!task) return;
+    const startMinutes = calculateDropTime(event);
+    const duration = taskDurationMinutes(task);
+    const latestStart = endHour * 60 - 30;
+    const safeStart = Math.min(startMinutes, latestStart);
+    const safeEnd = Math.min(endHour * 60, safeStart + Math.max(30, duration));
+    setDropPreview({
+      day,
+      startMinutes: safeStart,
+      endMinutes: Math.max(safeStart + 30, safeEnd),
+      color: task.color,
+      title: task.title,
+    });
+  }
+
+  async function handleDropOnDay(event, day) {
+    event.preventDefault();
+    const task = getDraggedTask(event);
+    if (!task) return finishDragging();
+    const startMinutes = dropPreview?.day === day ? dropPreview.startMinutes : calculateDropTime(event);
+    const duration = taskDurationMinutes(task);
+    const safeStart = Math.min(startMinutes, endHour * 60 - 30);
+    const safeEnd = Math.min(endHour * 60, safeStart + Math.max(30, duration));
+    await onMoveTask(task, {
+      deadline: day,
+      start_time: minutesToTime(safeStart),
+      end_time: minutesToTime(Math.max(safeStart + 30, safeEnd)),
+    });
+    finishDragging();
+  }
+
+  async function handleRemoveTime(event) {
+    event.preventDefault();
+    const task = getDraggedTask(event);
+    if (!task) return finishDragging();
+    await onMoveTask(task, { deadline: task.deadline, start_time: '', end_time: '' });
+    finishDragging();
+  }
 
   return (
     <Card>
       <div className="p-5">
-        <div className="mb-4 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+        <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div>
             <h2 className="text-xl font-semibold">Календарь недели</h2>
-            <p className="text-sm text-slate-500">Задачи по дням и времени.</p>
+            <p className="text-sm text-slate-500">Перетаскивайте задачи между днями и временем. Шаг планирования — 30 минут.</p>
           </div>
-          <span className="text-sm text-slate-500">{formatDate(days[0])} — {formatDate(days[6])}</span>
+          <div className="flex flex-wrap items-center gap-2 text-sm text-slate-500">
+            <span>{formatDate(days[0])} — {formatDate(days[6])}</span>
+            <span className="rounded-full bg-violet-50 px-3 py-1 text-xs font-medium text-violet-700">Изменения сохраняются сразу</span>
+          </div>
         </div>
 
-        {noTimeTasks.length > 0 && (
-          <div className="mb-4 rounded-2xl bg-slate-50 p-3">
-            <p className="mb-2 text-sm font-medium text-slate-700">Без времени</p>
-            <div className="grid gap-2 md:grid-cols-2 lg:grid-cols-4">
-              {noTimeTasks.map((task) => (
-                <button key={task.id} type="button" onClick={() => onEditTask(task)} className="rounded-xl p-2 text-left text-sm font-medium text-white" style={{ backgroundColor: task.color }}>
-                  {task.title}<span className="mt-1 block text-xs text-white/80">{task.owner} · {formatDate(task.deadline)}</span>
+        <div className="grid gap-4 xl:grid-cols-[280px_minmax(0,1fr)]">
+          <aside className="space-y-3">
+            <div className="rounded-2xl border border-violet-100 bg-gradient-to-br from-violet-50 to-sky-50 p-3">
+              <div className="flex items-start gap-2">
+                <span className="rounded-xl bg-white p-2 text-violet-600 shadow-sm"><GripVertical className="h-4 w-4" /></span>
+                <div><p className="text-sm font-semibold text-slate-800">Задачи без времени</p><p className="mt-1 text-xs leading-5 text-slate-500">Возьмите задачу и перетащите её на нужный день и час.</p></div>
+              </div>
+            </div>
+
+            <div className="max-h-[560px] space-y-2 overflow-y-auto pr-1">
+              {unscheduledTasks.map((task) => (
+                <button
+                  key={task.id}
+                  type="button"
+                  draggable
+                  onDragStart={(event) => startDragging(event, task)}
+                  onDragEnd={finishDragging}
+                  onClick={() => onEditTask(task)}
+                  className={`group w-full rounded-2xl border bg-white p-3 text-left shadow-sm transition hover:-translate-y-0.5 hover:shadow-md ${String(draggedTaskId) === String(task.id) ? 'opacity-45' : ''}`}
+                  style={{ borderLeft: `5px solid ${task.color}` }}
+                >
+                  <div className="flex items-start gap-2"><GripVertical className="mt-0.5 h-4 w-4 shrink-0 text-slate-300 group-hover:text-slate-500" /><div className="min-w-0"><p className="line-clamp-2 text-sm font-semibold text-slate-800">{task.title}</p><p className="mt-1 text-xs text-slate-500">{task.owner} · срок {formatDate(task.deadline)}</p></div></div>
                 </button>
               ))}
+              {unscheduledTasks.length === 0 && <div className="rounded-2xl border border-dashed p-5 text-center text-sm text-slate-500">Все задачи уже распределены по времени.</div>}
             </div>
-          </div>
-        )}
 
-        <div className="overflow-x-auto rounded-2xl border bg-white">
-          <div className="min-w-[900px]">
-            <div className="grid border-b bg-slate-50" style={{ gridTemplateColumns: '70px repeat(7, minmax(110px, 1fr))' }}>
-              <div className="p-3 text-xs text-slate-500">Время</div>
-              {days.map((day) => {
-                const date = new Date(`${day}T12:00:00`);
-                return (
-                  <div key={day} className={`border-l p-2 text-center ${day === todayIso() ? 'bg-violet-50' : ''}`}>
-                    <div className="text-xs uppercase text-slate-500">{new Intl.DateTimeFormat('ru-RU', { weekday: 'short' }).format(date)}</div>
-                    <div className="text-lg font-bold">{date.getDate()}</div>
-                  </div>
-                );
-              })}
+            <div
+              onDragOver={(event) => { event.preventDefault(); setRemoveTimeActive(true); }}
+              onDragLeave={() => setRemoveTimeActive(false)}
+              onDrop={handleRemoveTime}
+              className={`rounded-2xl border-2 border-dashed p-4 text-center transition ${removeTimeActive ? 'border-rose-400 bg-rose-50 text-rose-700' : 'border-slate-200 bg-slate-50 text-slate-500'}`}
+            >
+              <Clock className="mx-auto h-5 w-5" /><p className="mt-1 text-sm font-medium">Снять время с задачи</p><p className="mt-1 text-xs">Перетащите сюда задачу из календаря.</p>
             </div>
-            <div className="grid" style={{ gridTemplateColumns: '70px repeat(7, minmax(110px, 1fr))' }}>
-              <div className="relative bg-slate-50" style={{ height: gridHeight }}>
-                {Array.from({ length: totalRows + 1 }, (_, index) => (
-                  <div key={index} className="absolute left-0 right-0 border-t px-2 text-[11px] text-slate-500" style={{ top: index * rowHeight }}>
-                    {index % 2 === 0 ? `${String(startHour + index / 2).padStart(2, '0')}:00` : ''}
+          </aside>
+
+          <div className="overflow-x-auto rounded-2xl border bg-white">
+            <div className="min-w-[900px]">
+              <div className="grid border-b bg-slate-50" style={{ gridTemplateColumns: '70px repeat(7, minmax(110px, 1fr))' }}>
+                <div className="p-3 text-xs text-slate-500">Время</div>
+                {days.map((day) => {
+                  const date = new Date(`${day}T12:00:00`);
+                  return (
+                    <div key={day} className={`border-l p-2 text-center ${day === todayIso() ? 'bg-violet-50' : ''}`}>
+                      <div className="text-xs uppercase text-slate-500">{new Intl.DateTimeFormat('ru-RU', { weekday: 'short' }).format(date)}</div>
+                      <div className="text-lg font-bold">{date.getDate()}</div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="grid" style={{ gridTemplateColumns: '70px repeat(7, minmax(110px, 1fr))' }}>
+                <div className="relative bg-slate-50" style={{ height: gridHeight }}>
+                  {Array.from({ length: totalRows + 1 }, (_, index) => (
+                    <div key={index} className="absolute left-0 right-0 border-t px-2 text-[11px] text-slate-500" style={{ top: index * rowHeight }}>
+                      {index % 2 === 0 ? `${String(startHour + index / 2).padStart(2, '0')}:00` : ''}
+                    </div>
+                  ))}
+                </div>
+                {days.map((day) => (
+                  <div
+                    key={day}
+                    onDragOver={(event) => handleDragOverDay(event, day)}
+                    onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setDropPreview(null); }}
+                    onDrop={(event) => handleDropOnDay(event, day)}
+                    className={`relative border-l ${day === todayIso() ? 'bg-violet-50/30' : ''}`}
+                    style={{ height: gridHeight }}
+                  >
+                    {Array.from({ length: totalRows + 1 }, (_, index) => <div key={index} className={`absolute left-0 right-0 border-t ${index % 2 ? 'border-slate-100' : 'border-slate-200'}`} style={{ top: index * rowHeight }} />)}
+                    {dropPreview?.day === day && (
+                      <div
+                        className="pointer-events-none absolute left-1 right-1 z-20 rounded-lg border-2 border-dashed border-white/80 p-1.5 text-[11px] font-semibold text-white opacity-75 shadow-lg"
+                        style={{
+                          top: ((dropPreview.startMinutes - startHour * 60) / 30) * rowHeight,
+                          height: Math.max(34, ((dropPreview.endMinutes - dropPreview.startMinutes) / 30) * rowHeight - 3),
+                          backgroundColor: dropPreview.color,
+                        }}
+                      >
+                        {minutesToTime(dropPreview.startMinutes)} · {dropPreview.title}
+                      </div>
+                    )}
+                    {timedTasks.filter((task) => task.deadline === day).map((task) => {
+                      const startMinutes = toMinutes(task.start_time) ?? startHour * 60;
+                      const endMinutes = toMinutes(task.end_time) ?? startMinutes + 60;
+                      const top = Math.max(0, ((startMinutes - startHour * 60) / 30) * rowHeight);
+                      const height = Math.max(34, ((endMinutes - startMinutes) / 30) * rowHeight - 3);
+                      return (
+                        <button
+                          key={task.id}
+                          type="button"
+                          draggable
+                          onDragStart={(event) => startDragging(event, task)}
+                          onDragEnd={finishDragging}
+                          onClick={() => onEditTask(task)}
+                          className={`absolute left-1 right-1 z-10 overflow-hidden rounded-lg p-1.5 text-left text-[11px] font-semibold leading-tight text-white shadow-sm transition hover:brightness-105 ${String(draggedTaskId) === String(task.id) ? 'opacity-40' : ''}`}
+                          style={{ top, height, backgroundColor: task.color }}
+                          title={`${task.title}\n${task.owner}\n${formatTime(task.start_time)}–${formatTime(task.end_time)}`}
+                        >
+                          <span className="flex items-start gap-1"><GripVertical className="mt-0.5 h-3 w-3 shrink-0 opacity-75" /><span>{formatTime(task.start_time)} · {task.title}</span></span>
+                        </button>
+                      );
+                    })}
                   </div>
                 ))}
               </div>
-              {days.map((day) => (
-                <div key={day} className={`relative border-l ${day === todayIso() ? 'bg-violet-50/30' : ''}`} style={{ height: gridHeight }}>
-                  {Array.from({ length: totalRows + 1 }, (_, index) => <div key={index} className="absolute left-0 right-0 border-t" style={{ top: index * rowHeight }} />)}
-                  {timedTasks.filter((task) => task.deadline === day).map((task) => {
-                    const startMinutes = toMinutes(task.start_time) ?? startHour * 60;
-                    const endMinutes = toMinutes(task.end_time) ?? startMinutes + 60;
-                    const top = Math.max(0, ((startMinutes - startHour * 60) / 30) * rowHeight);
-                    const height = Math.max(34, ((endMinutes - startMinutes) / 30) * rowHeight - 3);
-                    return (
-                      <button
-                        key={task.id}
-                        type="button"
-                        onClick={() => onEditTask(task)}
-                        className="absolute left-1 right-1 z-10 overflow-hidden rounded-lg p-1.5 text-left text-[11px] font-semibold leading-tight text-white shadow-sm hover:brightness-105"
-                        style={{ top, height, backgroundColor: task.color }}
-                      >
-                        {formatTime(task.start_time)} · {task.title}
-                      </button>
-                    );
-                  })}
-                </div>
-              ))}
             </div>
           </div>
         </div>
@@ -454,6 +650,7 @@ export default function App() {
   const [transferFilter, setTransferFilter] = useState('current');
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('');
+  const [dataLoaded, setDataLoaded] = useState(false);
 
   const [isTaskModalOpen, setIsTaskModalOpen] = useState(false);
   const [isProjectModalOpen, setIsProjectModalOpen] = useState(false);
@@ -476,6 +673,7 @@ export default function App() {
   const nextWeekEnd = addDays(currentWeekStart, 13);
 
   async function loadData() {
+    setDataLoaded(false);
     setLoading(true);
     setMessage('');
 
@@ -493,6 +691,7 @@ export default function App() {
       setReschedules(localReschedules);
       setExpandedProjects(Object.fromEntries(localProjects.map((project) => [project.id, true])));
       setMessage('Локальный режим: данные сохраняются в этом браузере. Для общей работы команды подключите Supabase.');
+      setDataLoaded(true);
       setLoading(false);
       return;
     }
@@ -542,6 +741,7 @@ export default function App() {
       setExpandedProjects(Object.fromEntries(localProjects.map((project) => [project.id, true])));
       setMessage(`Общая база недоступна, открыта локальная копия. ${error.message}`);
     } finally {
+      setDataLoaded(true);
       setLoading(false);
     }
   }
@@ -550,11 +750,11 @@ export default function App() {
     loadData();
   }, []);
 
-  useEffect(() => localStorage.setItem(TASKS_STORAGE_KEY, JSON.stringify(tasks)), [tasks]);
-  useEffect(() => localStorage.setItem(EMPLOYEES_STORAGE_KEY, JSON.stringify(employees)), [employees]);
-  useEffect(() => localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(projects)), [projects]);
-  useEffect(() => localStorage.setItem(STAGES_STORAGE_KEY, JSON.stringify(stages)), [stages]);
-  useEffect(() => localStorage.setItem(RESCHEDULES_STORAGE_KEY, JSON.stringify(reschedules)), [reschedules]);
+  useEffect(() => { if (dataLoaded) localStorage.setItem(TASKS_STORAGE_KEY, JSON.stringify(tasks)); }, [tasks, dataLoaded]);
+  useEffect(() => { if (dataLoaded) localStorage.setItem(EMPLOYEES_STORAGE_KEY, JSON.stringify(employees)); }, [employees, dataLoaded]);
+  useEffect(() => { if (dataLoaded) localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(projects)); }, [projects, dataLoaded]);
+  useEffect(() => { if (dataLoaded) localStorage.setItem(STAGES_STORAGE_KEY, JSON.stringify(stages)); }, [stages, dataLoaded]);
+  useEffect(() => { if (dataLoaded) localStorage.setItem(RESCHEDULES_STORAGE_KEY, JSON.stringify(reschedules)); }, [reschedules, dataLoaded]);
 
   useEffect(() => {
     if (selectedEmployee !== 'Все' && !employeeNames.includes(selectedEmployee)) setSelectedEmployee('Все');
@@ -570,7 +770,7 @@ export default function App() {
       const project = projectById.get(String(task.project_id));
       const stage = stageById.get(String(task.stage_id));
       const matchesEmployee = selectedEmployee === 'Все' || task.owner === selectedEmployee;
-      const matchesSearch = !query || `${task.title} ${task.owner} ${task.comment} ${task.result} ${project?.name || ''} ${stage?.title || ''}`.toLowerCase().includes(query);
+      const matchesSearch = !query || `${task.title} ${task.owner} ${task.comment} ${task.resource_url} ${task.result} ${project?.name || ''} ${stage?.title || ''}`.toLowerCase().includes(query);
       const matchesFilter = taskFilter === 'all'
         || (taskFilter === 'active' && task.status !== 'Готово')
         || (taskFilter === 'today' && task.deadline === todayIso())
@@ -586,6 +786,11 @@ export default function App() {
       .filter((task) => isWithinRange(task.deadline, weekStart, weekEnd))
       .map((task) => ({ ...task, color: employees.find((employee) => employee.name === task.owner)?.color || '#7c3aed' }));
   }, [filteredTasks, selectedDate, employees]);
+
+  const unscheduledCalendarTasks = useMemo(() => filteredTasks
+    .filter((task) => !task.start_time || !task.end_time)
+    .sort((a, b) => String(a.deadline || '').localeCompare(String(b.deadline || '')))
+    .map((task) => ({ ...task, color: employees.find((employee) => employee.name === task.owner)?.color || '#7c3aed' })), [filteredTasks, employees]);
 
   const currentWeekCarryovers = useMemo(() => reschedules.filter((item) =>
     isWithinRange(item.old_deadline, currentWeekStart, currentWeekEnd) && item.new_deadline > currentWeekEnd
@@ -636,6 +841,7 @@ export default function App() {
         block: task.block || '',
         result: task.result || '',
         comment: task.comment || '',
+        resource_url: task.resource_url || '',
         project_id: task.project_id || '',
         stage_id: task.stage_id || '',
       });
@@ -754,7 +960,7 @@ export default function App() {
     }
   }
 
-  async function createRescheduleRecord(previousTask, updatedTask) {
+  async function createRescheduleRecord(previousTask, updatedTask, metadata = {}) {
     if (!previousTask || previousTask.deadline === updatedTask.deadline) return;
     const record = normalizeReschedule({
       task_id: updatedTask.id,
@@ -764,8 +970,8 @@ export default function App() {
       old_deadline: previousTask.deadline,
       new_deadline: updatedTask.deadline,
       changed_at: new Date().toISOString(),
-      changed_by: deadlineChange.changed_by || updatedTask.owner,
-      reason: deadlineChange.reason.trim(),
+      changed_by: metadata.changed_by || deadlineChange.changed_by || updatedTask.owner,
+      reason: metadata.reason ?? deadlineChange.reason.trim(),
     });
 
     setReschedules((previous) => [record, ...previous]);
@@ -788,6 +994,81 @@ export default function App() {
     }
   }
 
+
+  async function moveTaskInCalendar(task, schedule) {
+    const currentTask = taskById.get(String(task.id));
+    if (!currentTask) return;
+
+    const nextStart = normalizeTime(schedule.start_time || '');
+    const nextEnd = normalizeTime(schedule.end_time || '');
+    const nextDeadline = schedule.deadline || currentTask.deadline;
+    const updatedTask = normalizeTask({
+      ...currentTask,
+      deadline: nextDeadline,
+      start_time: nextStart,
+      end_time: nextEnd,
+      hours: currentTask.hours,
+    });
+
+    if (
+      updatedTask.deadline === currentTask.deadline
+      && updatedTask.start_time === currentTask.start_time
+      && updatedTask.end_time === currentTask.end_time
+    ) return;
+
+    const previousTasks = tasks;
+    createSafetySnapshot(tasks, `До перемещения задачи «${currentTask.title}»`);
+    setTasks((items) => items.map((item) => String(item.id) === String(currentTask.id) ? updatedTask : item));
+
+    try {
+      if (supabase && isRemoteId(currentTask.id)) {
+        const { error } = await supabase.from('tasks').update({
+          deadline: updatedTask.deadline,
+          start_time: updatedTask.start_time || null,
+          end_time: updatedTask.end_time || null,
+        }).eq('id', currentTask.id);
+        if (error) throw error;
+      }
+
+      if (currentTask.deadline !== updatedTask.deadline) {
+        await createRescheduleRecord(currentTask, updatedTask, {
+          changed_by: selectedEmployee !== 'Все' ? selectedEmployee : updatedTask.owner,
+          reason: 'Перенос выполнен перетаскиванием в календаре',
+        });
+      }
+
+      const timeText = updatedTask.start_time
+        ? `${formatTime(updatedTask.start_time)}–${formatTime(updatedTask.end_time)}`
+        : 'без времени';
+      setMessage(`Задача «${updatedTask.title}» перенесена на ${formatDate(updatedTask.deadline)}, ${timeText}. Изменение сохранено.`);
+    } catch (error) {
+      setTasks(previousTasks);
+      setMessage(`Не удалось сохранить перенос. Задача возвращена на прежнее место, данные не потеряны. ${error.message}`);
+    }
+  }
+
+  function downloadBackup() {
+    const payload = {
+      exported_at: new Date().toISOString(),
+      source: 'Mavis Task Tracker',
+      employees,
+      projects,
+      stages,
+      tasks,
+      reschedules,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `mavis-task-tracker-backup-${todayIso()}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    setMessage('Резервная копия проектов и задач скачана на компьютер.');
+  }
+
   async function saveTask() {
     if (!taskForm.title.trim()) {
       setMessage('Укажите название задачи.');
@@ -795,6 +1076,11 @@ export default function App() {
     }
     if (taskForm.stage_id && !taskForm.project_id) {
       setMessage('Этап можно выбрать только внутри проекта.');
+      return;
+    }
+    const resourceUrl = normalizeResourceUrl(taskForm.resource_url);
+    if (String(taskForm.resource_url || '').trim() && !resourceUrl) {
+      setMessage('Проверьте ссылку на материалы. Поддерживаются ссылки, начинающиеся с http:// или https://.');
       return;
     }
 
@@ -812,6 +1098,7 @@ export default function App() {
       block: taskForm.block.trim(),
       result: taskForm.result.trim(),
       comment: taskForm.comment.trim(),
+      resource_url: resourceUrl || '',
       project_id: taskForm.project_id || null,
       stage_id: taskForm.stage_id || null,
     };
@@ -1014,6 +1301,7 @@ export default function App() {
           status: TASK_STATUSES.includes(row['Статус']) ? row['Статус'] : 'Ожидает',
           priority: PRIORITIES.includes(row['Приоритет']) ? row['Приоритет'] : 'Средний',
           comment: String(row['Комментарий'] || ''),
+          resource_url: String(row['Ссылка'] || row['Материалы'] || row['Ссылка на материалы'] || row['URL'] || ''),
           result: String(row['Результат'] || ''),
         }));
       });
@@ -1050,7 +1338,10 @@ export default function App() {
                 <span className="rounded-full bg-rose-500/20 px-3 py-1.5 ring-1 ring-rose-400/20">{currentWeekCarryovers.length} переносов с недели</span>
               </div>
             </div>
-            <div className="grid gap-2 sm:grid-cols-2 xl:min-w-[620px] xl:grid-cols-4">
+            <div className="grid gap-2 sm:grid-cols-2 xl:min-w-[780px] xl:grid-cols-5">
+              <button type="button" onClick={downloadBackup} className="inline-flex items-center justify-center rounded-2xl bg-white/10 px-4 py-3 text-sm font-medium ring-1 ring-white/15 hover:bg-white/15" title="Скачать резервную копию всех текущих данных">
+                <Download className="mr-2 h-5 w-5" /> Резервная копия
+              </button>
               <button type="button" onClick={loadData} disabled={loading} className="inline-flex items-center justify-center rounded-2xl bg-white/10 px-4 py-3 text-sm font-medium ring-1 ring-white/15 hover:bg-white/15">
                 <RefreshCw className={`mr-2 h-5 w-5 ${loading ? 'animate-spin' : ''}`} /> Обновить
               </button>
@@ -1217,7 +1508,7 @@ export default function App() {
                                       <span className="text-sm">{formatDate(task.deadline)}</span>
                                       <span className="text-sm font-medium">{task.owner}</span>
                                       <select value={task.status} onChange={(event) => updateTaskStatus(task.id, event.target.value)} className={`rounded-xl border-0 px-2.5 py-2 text-sm ${statusStyle(task.status)}`}>{TASK_STATUSES.map((status) => <option key={status}>{status}</option>)}</select>
-                                      <span className="text-sm text-slate-600">{task.comment || '—'}</span>
+                                      <div className="min-w-0 text-sm text-slate-600"><span className="block">{task.comment || '—'}</span><TaskResourceLink url={task.resource_url} compact /></div>
                                       <span className="flex gap-1"><button type="button" onClick={() => openTaskModal(task)} className="rounded-lg bg-violet-50 p-2 text-violet-700 hover:bg-violet-100"><Edit3 className="h-4 w-4" /></button><button type="button" onClick={() => deleteTask(task)} className="rounded-lg bg-rose-50 p-2 text-rose-600 hover:bg-rose-100"><Trash2 className="h-4 w-4" /></button></span>
                                     </div>
                                   ))}
@@ -1247,8 +1538,8 @@ export default function App() {
 
         {activeTab === 'calendar' && (
           <div className="space-y-4">
-            <Card><div className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between"><div className="flex items-center gap-2"><button type="button" onClick={() => setSelectedDate(addDays(selectedDate, -7))} className="rounded-xl border bg-white p-2"><ChevronLeft className="h-5 w-5" /></button><input type="date" value={selectedDate} onChange={(event) => setSelectedDate(event.target.value)} className="rounded-xl border px-3 py-2 text-sm" /><button type="button" onClick={() => setSelectedDate(addDays(selectedDate, 7))} className="rounded-xl border bg-white p-2"><ChevronRight className="h-5 w-5" /></button><button type="button" onClick={() => setSelectedDate(todayIso())} className="rounded-xl bg-slate-900 px-3 py-2 text-sm font-medium text-white">Сегодня</button></div><button type="button" onClick={() => openTaskModal()} className="inline-flex items-center justify-center rounded-xl bg-violet-600 px-4 py-2 text-sm font-medium text-white"><Plus className="mr-2 h-4 w-4" />Новая задача</button></div></Card>
-            <WeekCalendar tasks={calendarTasks} selectedDate={selectedDate} onEditTask={openTaskModal} />
+            <Card><div className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between"><div className="flex flex-wrap items-center gap-2"><button type="button" onClick={() => setSelectedDate(addDays(selectedDate, -7))} className="rounded-xl border bg-white p-2"><ChevronLeft className="h-5 w-5" /></button><input type="date" value={selectedDate} onChange={(event) => setSelectedDate(event.target.value)} className="rounded-xl border px-3 py-2 text-sm" /><button type="button" onClick={() => setSelectedDate(addDays(selectedDate, 7))} className="rounded-xl border bg-white p-2"><ChevronRight className="h-5 w-5" /></button><button type="button" onClick={() => setSelectedDate(todayIso())} className="rounded-xl bg-slate-900 px-3 py-2 text-sm font-medium text-white">Сегодня</button><span className="inline-flex items-center rounded-xl bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-700"><ShieldCheck className="mr-1.5 h-4 w-4" />Перетаскивание не удаляет задачи</span></div><button type="button" onClick={() => openTaskModal()} className="inline-flex items-center justify-center rounded-xl bg-violet-600 px-4 py-2 text-sm font-medium text-white"><Plus className="mr-2 h-4 w-4" />Новая задача</button></div></Card>
+            <WeekCalendar tasks={calendarTasks} unscheduledTasks={unscheduledCalendarTasks} selectedDate={selectedDate} onEditTask={openTaskModal} onMoveTask={moveTaskInCalendar} />
           </div>
         )}
 
@@ -1259,7 +1550,7 @@ export default function App() {
               <div className="space-y-3">{filteredTasks.map((task) => {
                 const project = projectById.get(String(task.project_id));
                 const stage = stageById.get(String(task.stage_id));
-                return <div key={task.id} className="rounded-2xl border bg-white p-4 hover:border-violet-200 hover:shadow-sm"><div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between"><div className="space-y-2"><div className="flex flex-wrap gap-2"><span className={`rounded-full px-3 py-1 text-xs ${statusStyle(task.status)}`}>{task.status}</span><span className={`rounded-full px-3 py-1 text-xs ${priorityStyle(task.priority)}`}>{task.priority}</span>{project && <span className="rounded-full bg-violet-50 px-3 py-1 text-xs text-violet-700">{project.name}</span>}{stage && <span className="rounded-full bg-sky-50 px-3 py-1 text-xs text-sky-700">{stage.title}</span>}</div><h3 className="text-lg font-semibold">{task.title}</h3><p className="text-sm text-slate-600"><b>Комментарий:</b> {task.comment || '—'}</p><p className="text-sm text-slate-500">{task.owner} · {formatDate(task.deadline)} · {formatTime(task.start_time)}{task.end_time ? `–${formatTime(task.end_time)}` : ''} · {task.hours} ч</p></div><div className="flex flex-wrap gap-2"><select value={task.status} onChange={(event) => updateTaskStatus(task.id, event.target.value)} className={`rounded-xl border-0 px-3 py-2 text-sm ${statusStyle(task.status)}`}>{TASK_STATUSES.map((status) => <option key={status}>{status}</option>)}</select><button type="button" onClick={() => openTaskModal(task)} className="inline-flex items-center rounded-xl bg-violet-50 px-3 py-2 text-sm font-medium text-violet-700"><Edit3 className="mr-2 h-4 w-4" />Изменить</button><button type="button" onClick={() => deleteTask(task)} className="rounded-xl border border-rose-100 px-3 py-2 text-rose-600"><Trash2 className="h-4 w-4" /></button></div></div></div>;
+                return <div key={task.id} className="rounded-2xl border bg-white p-4 hover:border-violet-200 hover:shadow-sm"><div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between"><div className="space-y-2"><div className="flex flex-wrap gap-2"><span className={`rounded-full px-3 py-1 text-xs ${statusStyle(task.status)}`}>{task.status}</span><span className={`rounded-full px-3 py-1 text-xs ${priorityStyle(task.priority)}`}>{task.priority}</span>{project && <span className="rounded-full bg-violet-50 px-3 py-1 text-xs text-violet-700">{project.name}</span>}{stage && <span className="rounded-full bg-sky-50 px-3 py-1 text-xs text-sky-700">{stage.title}</span>}</div><h3 className="text-lg font-semibold">{task.title}</h3><p className="text-sm text-slate-600"><b>Комментарий:</b> {task.comment || '—'}</p>{task.resource_url && <TaskResourceLink url={task.resource_url} />}<p className="text-sm text-slate-500">{task.owner} · {formatDate(task.deadline)} · {formatTime(task.start_time)}{task.end_time ? `–${formatTime(task.end_time)}` : ''} · {task.hours} ч</p></div><div className="flex flex-wrap gap-2"><select value={task.status} onChange={(event) => updateTaskStatus(task.id, event.target.value)} className={`rounded-xl border-0 px-3 py-2 text-sm ${statusStyle(task.status)}`}>{TASK_STATUSES.map((status) => <option key={status}>{status}</option>)}</select><button type="button" onClick={() => openTaskModal(task)} className="inline-flex items-center rounded-xl bg-violet-50 px-3 py-2 text-sm font-medium text-violet-700"><Edit3 className="mr-2 h-4 w-4" />Изменить</button><button type="button" onClick={() => deleteTask(task)} className="rounded-xl border border-rose-100 px-3 py-2 text-rose-600"><Trash2 className="h-4 w-4" /></button></div></div></div>;
               })}{filteredTasks.length === 0 && <div className="rounded-2xl border border-dashed p-8 text-center text-slate-500">По выбранным фильтрам задач нет.</div>}</div>
             </div>
           </Card>
@@ -1341,7 +1632,12 @@ export default function App() {
             <Field label="Приоритет"><select value={taskForm.priority} onChange={(event) => setTaskForm({ ...taskForm, priority: event.target.value })} className="w-full rounded-2xl border bg-white px-3 py-2.5">{PRIORITIES.map((priority) => <option key={priority}>{priority}</option>)}</select></Field>
             <Field label="Загрузка, часов"><input type="number" min="0" step="0.5" value={taskForm.hours} onChange={(event) => setTaskForm({ ...taskForm, hours: event.target.value })} className="w-full rounded-2xl border px-3 py-2.5" /></Field>
             <Field label="Измеримый результат" className="md:col-span-2"><textarea value={taskForm.result} onChange={(event) => setTaskForm({ ...taskForm, result: event.target.value })} rows="2" placeholder="Что будет считаться готовым результатом" className="w-full rounded-2xl border px-3 py-2.5" /></Field>
-            <Field label="Комментарий" className="md:col-span-2"><textarea value={taskForm.comment} onChange={(event) => setTaskForm({ ...taskForm, comment: event.target.value })} rows="3" placeholder="Текущий ход работы, ссылка, договорённость или блокер" className="w-full rounded-2xl border px-3 py-2.5" /></Field>
+            <Field label="Комментарий" className="md:col-span-2"><textarea value={taskForm.comment} onChange={(event) => setTaskForm({ ...taskForm, comment: event.target.value })} rows="3" placeholder="Текущий ход работы, договорённость, результат или блокер" className="w-full rounded-2xl border px-3 py-2.5" /></Field>
+            <Field label="Ссылка на материалы" className="md:col-span-2">
+              <div className="relative"><Link2 className="absolute left-3 top-3 h-4 w-4 text-slate-400" /><input type="url" value={taskForm.resource_url} onChange={(event) => setTaskForm({ ...taskForm, resource_url: event.target.value })} placeholder="https://docs.google.com/spreadsheets/..." className="w-full rounded-2xl border px-3 py-2.5 pl-10" /></div>
+              <span className="mt-1 block text-xs text-slate-500">Можно вставить Google-таблицу, документ, Miro, папку Drive или любую рабочую ссылку. После сохранения она будет открываться из карточки задачи.</span>
+              {normalizeResourceUrl(taskForm.resource_url) && <div className="mt-2"><TaskResourceLink url={normalizeResourceUrl(taskForm.resource_url)} compact /></div>}
+            </Field>
 
             {deadlineWasChanged && (
               <div className="md:col-span-2 rounded-2xl border border-rose-200 bg-gradient-to-r from-rose-50 to-orange-50 p-4">

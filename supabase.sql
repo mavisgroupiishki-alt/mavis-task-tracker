@@ -13,6 +13,8 @@ create table if not exists public.tasks (
   end_time time,
   block text default '',
   result text default '',
+  comment text not null default '',
+  resource_url text not null default '',
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
