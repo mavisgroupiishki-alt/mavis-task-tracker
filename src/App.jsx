@@ -245,6 +245,7 @@ function normalizeProject(project, index = 0) {
     description: project.description || '',
     owner: normalizeOwner(project.owner || 'Саша'),
     customer: String(project.customer || '').trim(),
+    section_id: project.section_id || null,
     deadline: project.deadline || '',
     status: PROJECT_STATUSES.includes(project.status) ? project.status : 'В работе',
     color: project.color || PROJECT_COLORS[index % PROJECT_COLORS.length],
@@ -686,13 +687,16 @@ export default function App() {
   const [stages, setStages] = useState([]);
   const [sections, setSections] = useState([]);
   const [reschedules, setReschedules] = useState([]);
-  const [activeTab, setActiveTab] = useState('projects');
+  const [activeTab, setActiveTab] = useState('sections');
   const [selectedDate, setSelectedDate] = useState(todayIso());
   const [selectedEmployee, setSelectedEmployee] = useState('Все');
   const [search, setSearch] = useState('');
   const [taskFilter, setTaskFilter] = useState('all');
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [sectionStatusFilters, setSectionStatusFilters] = useState({});
   const [dateFilterMode, setDateFilterMode] = useState('all');
   const [dateFilterDate, setDateFilterDate] = useState(todayIso());
+  const [expandedSections, setExpandedSections] = useState({});
   const [expandedProjects, setExpandedProjects] = useState({});
   const [expandedStages, setExpandedStages] = useState({});
   const [transferFilter, setTransferFilter] = useState('current');
@@ -711,7 +715,7 @@ export default function App() {
   const [editingSectionId, setEditingSectionId] = useState(null);
 
   const [taskForm, setTaskForm] = useState(emptyTaskForm(todayIso(), 'Саша'));
-  const [projectForm, setProjectForm] = useState({ name: '', description: '', owner: 'Саша', customer: '', deadline: '', status: 'В работе', color: PROJECT_COLORS[0] });
+  const [projectForm, setProjectForm] = useState({ name: '', description: '', owner: 'Саша', customer: '', section_id: '', deadline: '', status: 'В работе', color: PROJECT_COLORS[0] });
   const [stageForm, setStageForm] = useState({ project_id: '', title: '', description: '', owner: 'Саша', deadline: '', sort_order: 1 });
   const [sectionForm, setSectionForm] = useState({ name: '', description: '', owner: 'Саша', color: SECTION_COLORS[0] });
   const [employeeForm, setEmployeeForm] = useState({ name: '', role: '', color: EMPLOYEE_COLORS[0] });
@@ -742,6 +746,8 @@ export default function App() {
       setSections(localSections);
       setTasks(localTasks);
       setReschedules(localReschedules);
+      setExpandedSections(Object.fromEntries(localSections.map((section) => [section.id, true])));
+      setExpandedSections(Object.fromEntries(localSections.map((section) => [section.id, true])));
       setExpandedProjects(Object.fromEntries(localProjects.map((project) => [project.id, true])));
       setMessage('Локальный режим: данные сохраняются в этом браузере. Для общей работы команды подключите Supabase.');
       setDataLoaded(true);
@@ -782,11 +788,12 @@ export default function App() {
       setSections(loadedSections);
       setTasks(loadedTasks);
       setReschedules(loadedReschedules);
+      setExpandedSections(Object.fromEntries(loadedSections.map((section) => [section.id, true])));
       setExpandedProjects(Object.fromEntries(loadedProjects.map((project) => [project.id, true])));
 
       const migrationMissing = projectsResult.error || stagesResult.error || sectionsResult.error || reschedulesResult.error;
       setMessage(migrationMissing
-        ? 'Основные данные загружены. Для разделов и заказчиков выполните файл supabase_sections_filters_update.sql из архива.'
+        ? 'Основные данные загружены. Для разделов и заказчиков выполните файл supabase_hierarchy_sections_update.sql из архива.'
         : 'Данные проектов, задач и истории переносов загружены из общей базы Supabase.');
     } catch (error) {
       setEmployees(localEmployees);
@@ -828,17 +835,21 @@ export default function App() {
     return tasks.filter((task) => {
       const project = projectById.get(String(task.project_id));
       const stage = stageById.get(String(task.stage_id));
-      const section = sectionById.get(String(task.section_id));
+      const section = sectionById.get(String(project?.section_id || task.section_id));
       const matchesEmployee = selectedEmployee === 'Все' || task.owner === selectedEmployee;
       const matchesSearch = !query || `${task.title} ${task.owner} ${task.comment} ${task.resource_url} ${task.result} ${project?.name || ''} ${stage?.title || ''} ${section?.name || ''}`.toLowerCase().includes(query);
       const matchesFilter = taskFilter === 'all'
         || (taskFilter === 'active' && !isTaskCompleted(task))
         || (taskFilter === 'today' && task.deadline === todayIso())
         || (taskFilter === 'overdue' && task.deadline < todayIso() && !isTaskCompleted(task));
+      const matchesStatus = statusFilter === 'all'
+        || (statusFilter === 'active' && !isTaskCompleted(task))
+        || (statusFilter === 'completed' && isTaskCompleted(task))
+        || task.status === statusFilter;
       const matchesDate = matchesDateFilter(task.deadline, dateFilterMode, dateFilterDate);
-      return matchesEmployee && matchesSearch && matchesFilter && matchesDate;
+      return matchesEmployee && matchesSearch && matchesFilter && matchesStatus && matchesDate;
     });
-  }, [tasks, search, selectedEmployee, taskFilter, dateFilterMode, dateFilterDate, projectById, stageById, sectionById]);
+  }, [tasks, search, selectedEmployee, taskFilter, statusFilter, dateFilterMode, dateFilterDate, projectById, stageById, sectionById]);
 
   const filteredProjects = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -846,25 +857,34 @@ export default function App() {
       const allProjectTasks = tasks.filter((task) => String(task.project_id) === String(project.id));
       const visibleProjectTasks = filteredTasks.filter((task) => String(task.project_id) === String(project.id));
       const employeeMatch = selectedEmployee === 'Все' || project.owner === selectedEmployee || allProjectTasks.some((task) => task.owner === selectedEmployee);
-      const searchMatch = !query || `${project.name} ${project.description} ${project.owner} ${project.customer}`.toLowerCase().includes(query)
+      const projectSection = sectionById.get(String(project.section_id));
+      const searchMatch = !query || `${project.name} ${project.description} ${project.owner} ${project.customer} ${projectSection?.name || ''}`.toLowerCase().includes(query)
         || allProjectTasks.some((task) => `${task.title} ${task.comment}`.toLowerCase().includes(query));
       const dateMatch = dateFilterMode === 'all' || matchesDateFilter(project.deadline, dateFilterMode, dateFilterDate) || visibleProjectTasks.length > 0;
       return employeeMatch && searchMatch && dateMatch;
     });
-  }, [projects, tasks, filteredTasks, search, selectedEmployee, dateFilterMode, dateFilterDate]);
+  }, [projects, tasks, filteredTasks, search, selectedEmployee, dateFilterMode, dateFilterDate, sectionById]);
 
   const filteredSections = useMemo(() => {
     const query = search.trim().toLowerCase();
     return sections.filter((section) => {
-      const allSectionTasks = tasks.filter((task) => String(task.section_id) === String(section.id));
-      const visibleSectionTasks = filteredTasks.filter((task) => String(task.section_id) === String(section.id));
-      const employeeMatch = selectedEmployee === 'Все' || section.owner === selectedEmployee || allSectionTasks.some((task) => task.owner === selectedEmployee);
-      const searchMatch = !query || `${section.name} ${section.description} ${section.owner}`.toLowerCase().includes(query)
+      const sectionProjects = projects.filter((project) => String(project.section_id) === String(section.id));
+      const projectIds = new Set(sectionProjects.map((project) => String(project.id)));
+      const allSectionTasks = tasks.filter((task) => projectIds.has(String(task.project_id)) || (!task.project_id && String(task.section_id) === String(section.id)));
+      const visibleSectionTasks = filteredTasks.filter((task) => projectIds.has(String(task.project_id)) || (!task.project_id && String(task.section_id) === String(section.id)));
+      const visibleSectionProjects = filteredProjects.filter((project) => String(project.section_id) === String(section.id));
+      const employeeMatch = selectedEmployee === 'Все'
+        || section.owner === selectedEmployee
+        || sectionProjects.some((project) => project.owner === selectedEmployee)
+        || allSectionTasks.some((task) => task.owner === selectedEmployee);
+      const searchMatch = !query
+        || `${section.name} ${section.description} ${section.owner}`.toLowerCase().includes(query)
+        || sectionProjects.some((project) => `${project.name} ${project.description} ${project.customer}`.toLowerCase().includes(query))
         || allSectionTasks.some((task) => `${task.title} ${task.comment}`.toLowerCase().includes(query));
-      const dateMatch = dateFilterMode === 'all' || visibleSectionTasks.length > 0;
+      const dateMatch = dateFilterMode === 'all' || visibleSectionTasks.length > 0 || visibleSectionProjects.length > 0;
       return employeeMatch && searchMatch && dateMatch;
     });
-  }, [sections, tasks, filteredTasks, search, selectedEmployee, dateFilterMode]);
+  }, [sections, projects, tasks, filteredTasks, filteredProjects, search, selectedEmployee, dateFilterMode]);
 
   const calendarTasks = useMemo(() => {
     const weekStart = getWeekStart(selectedDate);
@@ -896,21 +916,56 @@ export default function App() {
   const summary = useMemo(() => ({
     projects: projects.filter((project) => project.status !== 'Готово').length,
     tasks: tasks.length,
-    active: tasks.filter((task) => task.status !== 'Готово').length,
-    done: tasks.filter((task) => task.status === 'Готово').length,
-    overdue: tasks.filter((task) => task.deadline < todayIso() && task.status !== 'Готово').length,
+    active: tasks.filter((task) => !isTaskCompleted(task)).length,
+    done: tasks.filter((task) => isTaskCompleted(task)).length,
+    overdue: tasks.filter((task) => task.deadline < todayIso() && !isTaskCompleted(task)).length,
     carryovers: currentWeekCarryovers.length,
   }), [projects, tasks, currentWeekCarryovers]);
 
   const workload = useMemo(() => employees.map((employee) => {
-    const personTasks = tasks.filter((task) => task.owner === employee.name && task.status !== 'Готово');
+    const personTasks = tasks.filter((task) => task.owner === employee.name && !isTaskCompleted(task));
     return {
       name: employee.name,
-      hours: Math.round(personTasks.reduce((sum, task) => sum + Number(task.hours || 0), 0) * 10) / 10,
       tasks: personTasks.length,
+      overdue: personTasks.filter((task) => task.deadline < todayIso()).length,
       color: employee.color,
     };
   }), [employees, tasks]);
+
+  function resetAllFilters() {
+    setSearch('');
+    setSelectedEmployee('Все');
+    setTaskFilter('all');
+    setStatusFilter('all');
+    setDateFilterMode('all');
+    setDateFilterDate(todayIso());
+    setSectionStatusFilters({});
+    setMessage('Все фильтры сброшены.');
+  }
+
+  function matchesLocalTaskStatus(task, mode) {
+    if (!mode || mode === 'all') return true;
+    if (mode === 'active') return !isTaskCompleted(task);
+    if (mode === 'completed') return isTaskCompleted(task);
+    return task.status === mode;
+  }
+
+  async function moveProjectToSection(project, nextSectionId) {
+    const previousProjects = projects;
+    const sectionId = nextSectionId || null;
+    setProjects((items) => items.map((item) => String(item.id) === String(project.id) ? { ...item, section_id: sectionId } : item));
+    try {
+      if (supabase && isRemoteId(project.id)) {
+        const { error } = await supabase.from('projects').update({ section_id: isRemoteId(sectionId) ? sectionId : null }).eq('id', project.id);
+        if (error) throw error;
+      }
+      const section = sectionById.get(String(sectionId));
+      setMessage(section ? `Проект «${project.name}» перемещён в раздел «${section.name}».` : `Проект «${project.name}» вынесен из раздела.`);
+    } catch (error) {
+      setProjects(previousProjects);
+      setMessage(`Не удалось переместить проект. Данные возвращены на место. ${error.message}`);
+    }
+  }
 
   function openTaskModal(task = null, projectId = '', stageId = '', sectionId = '') {
     if (task) {
@@ -948,13 +1003,13 @@ export default function App() {
     setIsTaskModalOpen(true);
   }
 
-  function openProjectModal(project = null) {
+  function openProjectModal(project = null, sectionId = '') {
     if (project) {
       setEditingProjectId(project.id);
-      setProjectForm({ name: project.name, description: project.description, owner: project.owner, customer: project.customer || '', deadline: project.deadline || '', status: project.status, color: project.color });
+      setProjectForm({ name: project.name, description: project.description, owner: project.owner, customer: project.customer || '', section_id: project.section_id || '', deadline: project.deadline || '', status: project.status, color: project.color });
     } else {
       setEditingProjectId(null);
-      setProjectForm({ name: '', description: '', owner: selectedEmployee !== 'Все' ? selectedEmployee : employeeNames[0] || 'Саша', customer: '', deadline: '', status: 'В работе', color: PROJECT_COLORS[projects.length % PROJECT_COLORS.length] });
+      setProjectForm({ name: '', description: '', owner: selectedEmployee !== 'Все' ? selectedEmployee : employeeNames[0] || 'Саша', customer: '', section_id: sectionId || '', deadline: '', status: 'В работе', color: PROJECT_COLORS[projects.length % PROJECT_COLORS.length] });
     }
     setIsProjectModalOpen(true);
   }
@@ -977,19 +1032,21 @@ export default function App() {
       setMessage('Укажите название проекта.');
       return;
     }
-    const payload = { ...projectForm, name: projectForm.name.trim(), description: projectForm.description.trim(), customer: projectForm.customer.trim(), deadline: projectForm.deadline || null };
+    const payload = { ...projectForm, name: projectForm.name.trim(), description: projectForm.description.trim(), customer: projectForm.customer.trim(), section_id: projectForm.section_id || null, deadline: projectForm.deadline || null };
 
     try {
       if (editingProjectId) {
         const normalized = normalizeProject({ ...projectById.get(String(editingProjectId)), ...payload, id: editingProjectId });
         setProjects((previous) => previous.map((project) => String(project.id) === String(editingProjectId) ? normalized : project));
         if (supabase && isRemoteId(editingProjectId)) {
-          const { error } = await supabase.from('projects').update(payload).eq('id', editingProjectId);
+          const dbPayload = { ...payload, section_id: isRemoteId(payload.section_id) ? payload.section_id : null };
+          const { error } = await supabase.from('projects').update(dbPayload).eq('id', editingProjectId);
           if (error) throw error;
         }
         setMessage('Проект обновлён.');
       } else if (supabase) {
-        const { data, error } = await supabase.from('projects').insert(payload).select().single();
+        const dbPayload = { ...payload, section_id: isRemoteId(payload.section_id) ? payload.section_id : null };
+        const { data, error } = await supabase.from('projects').insert(dbPayload).select().single();
         if (error) throw error;
         const project = normalizeProject(data, projects.length);
         setProjects((previous) => [project, ...previous]);
@@ -1008,7 +1065,7 @@ export default function App() {
         setProjects((previous) => [project, ...previous]);
         setExpandedProjects((previous) => ({ ...previous, [project.id]: true }));
       }
-      setMessage(`Проект сохранён локально. Для поля заказчика выполните supabase_sections_filters_update.sql. ${error.message}`);
+      setMessage(`Проект сохранён локально. Для иерархии разделов выполните supabase_hierarchy_sections_update.sql. ${error.message}`);
       setIsProjectModalOpen(false);
     }
   }
@@ -1102,15 +1159,16 @@ export default function App() {
       if (!editingSectionId) {
         setSections((previous) => [...previous, normalizeSection({ ...payload, id: `local-section-${Date.now()}` }, previous.length)]);
       }
-      setMessage(`Раздел сохранён локально. Выполните supabase_sections_filters_update.sql. ${error.message}`);
+      setMessage(`Раздел сохранён локально. Выполните supabase_hierarchy_sections_update.sql. ${error.message}`);
       setIsSectionModalOpen(false);
     }
   }
 
   async function deleteSection(section) {
-    const linkedTasks = tasks.filter((task) => String(task.section_id) === String(section.id));
-    if (linkedTasks.length) {
-      setMessage(`Нельзя удалить раздел «${section.name}»: внутри ${linkedTasks.length} задач. Сначала перенесите их.`);
+    const linkedProjects = projects.filter((project) => String(project.section_id) === String(section.id));
+    const linkedTasks = tasks.filter((task) => !task.project_id && String(task.section_id) === String(section.id));
+    if (linkedProjects.length || linkedTasks.length) {
+      setMessage(`Нельзя удалить раздел «${section.name}»: внутри ${linkedProjects.length} проектов и ${linkedTasks.length} задач без проекта. Сначала перенесите их.`);
       return;
     }
     const previous = sections;
@@ -1450,7 +1508,7 @@ export default function App() {
       if (!rows.length) throw new Error('В таблице нет строк.');
 
       const projectName = file.name.replace(/\.(xlsx|xls|csv)$/i, '') || 'Импортированный проект';
-      const project = normalizeProject({ id: `local-project-${Date.now()}`, name: projectName, owner: selectedEmployee !== 'Все' ? selectedEmployee : employeeNames[0], deadline: '', status: 'В работе', color: PROJECT_COLORS[projects.length % PROJECT_COLORS.length] }, projects.length);
+      const project = normalizeProject({ id: `local-project-${Date.now()}`, name: projectName, section_id: null, owner: selectedEmployee !== 'Все' ? selectedEmployee : employeeNames[0], deadline: '', status: 'В работе', color: PROJECT_COLORS[projects.length % PROJECT_COLORS.length] }, projects.length);
       const newStages = [];
       const newTasks = [];
       const stageMap = new Map();
@@ -1496,6 +1554,94 @@ export default function App() {
   const editingTask = editingTaskId ? taskById.get(String(editingTaskId)) : null;
   const deadlineWasChanged = Boolean(editingTask && taskForm.deadline !== editingTask.deadline);
 
+  function renderHierarchyProject(project, localStatusMode = 'active') {
+    const projectStages = stages.filter((stage) => String(stage.project_id) === String(project.id)).sort((a, b) => a.sort_order - b.sort_order);
+    const allProjectTasks = tasks.filter((task) => String(task.project_id) === String(project.id));
+    const visibleProjectTasks = filteredTasks
+      .filter((task) => String(task.project_id) === String(project.id))
+      .filter((task) => matchesLocalTaskStatus(task, localStatusMode));
+    const projectProgress = calculateProgress(allProjectTasks);
+    const projectStatus = deriveStatus(allProjectTasks, project.status);
+    const expanded = expandedProjects[project.id] !== false;
+    const tasksWithoutStage = visibleProjectTasks.filter((task) => !task.stage_id);
+
+    return (
+      <div key={project.id} className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+        <div className="h-1.5" style={{ backgroundColor: project.color }} />
+        <div className="p-4">
+          <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+            <button type="button" onClick={() => setExpandedProjects((previous) => ({ ...previous, [project.id]: !expanded }))} className="flex min-w-0 flex-1 items-start gap-3 text-left">
+              <span className="rounded-xl p-2 text-white" style={{ backgroundColor: project.color }}><FolderKanban className="h-4 w-4" /></span>
+              <span className="min-w-0 flex-1">
+                <span className="flex flex-wrap items-center gap-2"><b className="text-base">{project.name}</b><span className={`rounded-full px-2.5 py-1 text-xs ${statusStyle(projectStatus)}`}>{projectStatus}</span></span>
+                <span className="mt-1 block text-sm text-slate-500">{project.description || 'Описание проекта не заполнено'}</span>
+                <span className="mt-2 block max-w-xl"><ProgressBar value={projectProgress} color={project.color} /></span>
+              </span>
+              {expanded ? <ChevronUp className="mt-1 h-4 w-4 text-slate-400" /> : <ChevronDown className="mt-1 h-4 w-4 text-slate-400" />}
+            </button>
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <span className="rounded-lg bg-slate-100 px-2.5 py-1.5"><b>{project.owner}</b> · {project.deadline ? formatDate(project.deadline) : 'без срока'}</span>
+              {project.customer && <span className="rounded-lg bg-amber-50 px-2.5 py-1.5 text-amber-800">Заказчик: {project.customer}</span>}
+              <span className="rounded-lg bg-slate-100 px-2.5 py-1.5">{allProjectTasks.filter((task) => !isTaskCompleted(task)).length} активных · {allProjectTasks.length} всего</span>
+              <select value={project.section_id || ''} onChange={(event) => moveProjectToSection(project, event.target.value)} className="rounded-lg border border-cyan-200 bg-cyan-50 px-2.5 py-1.5 font-medium text-cyan-800"><option value="">Без раздела</option>{sections.map((section) => <option key={section.id} value={section.id}>{section.name}</option>)}</select>
+              <button type="button" onClick={() => openStageModal(project.id)} className="inline-flex items-center rounded-lg bg-sky-50 px-2.5 py-1.5 font-medium text-sky-700"><Layers3 className="mr-1 h-3.5 w-3.5" />Этап</button>
+              <button type="button" onClick={() => openTaskModal(null, project.id)} className="inline-flex items-center rounded-lg bg-violet-600 px-2.5 py-1.5 font-medium text-white"><Plus className="mr-1 h-3.5 w-3.5" />Задача</button>
+              <button type="button" onClick={() => openProjectModal(project)} className="rounded-lg border p-1.5 text-slate-600"><Edit3 className="h-3.5 w-3.5" /></button>
+            </div>
+          </div>
+
+          {expanded && (
+            <div className="mt-4 space-y-3">
+              {projectStages.map((stage) => {
+                const allStageTasks = allProjectTasks.filter((task) => String(task.stage_id) === String(stage.id));
+                const stageTasks = visibleProjectTasks.filter((task) => String(task.stage_id) === String(stage.id));
+                const stageProgress = calculateProgress(allStageTasks);
+                const stageStatus = deriveStatus(allStageTasks);
+                const stageExpanded = expandedStages[stage.id] !== false;
+                return (
+                  <div key={stage.id} className="overflow-hidden rounded-xl border border-slate-200 bg-slate-50/80">
+                    <div className="flex flex-col gap-2 p-3 lg:flex-row lg:items-center lg:justify-between">
+                      <button type="button" onClick={() => setExpandedStages((previous) => ({ ...previous, [stage.id]: !stageExpanded }))} className="flex min-w-0 flex-1 items-center gap-2 text-left">
+                        <span className="rounded-lg bg-white p-1.5 text-violet-600"><Layers3 className="h-3.5 w-3.5" /></span>
+                        <span className="min-w-0 flex-1"><span className="flex flex-wrap items-center gap-2"><b className="text-sm">{stage.sort_order}. {stage.title}</b><span className={`rounded-full px-2 py-0.5 text-[11px] ${statusStyle(stageStatus)}`}>{stageStatus}</span></span><span className="mt-1 block max-w-md"><ProgressBar value={stageProgress} color={project.color} /></span></span>
+                        {stageExpanded ? <ChevronUp className="h-4 w-4 text-slate-400" /> : <ChevronDown className="h-4 w-4 text-slate-400" />}
+                      </button>
+                      <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600"><span className="rounded-lg bg-white px-2 py-1">{stage.owner}</span><span className="rounded-lg bg-white px-2 py-1">{stage.deadline ? formatDate(stage.deadline) : 'Без срока'}</span><span className="rounded-lg bg-white px-2 py-1">{stageTasks.length} показано / {allStageTasks.length}</span><button type="button" onClick={() => openTaskModal(null, project.id, stage.id)} className="rounded-lg bg-violet-600 px-2.5 py-1 font-medium text-white">+ Задача</button><button type="button" onClick={() => openStageModal(project.id, stage)} className="rounded-lg bg-white p-1.5"><Edit3 className="h-3.5 w-3.5" /></button></div>
+                    </div>
+                    {stageExpanded && (
+                      <div className="border-t bg-white">
+                        {stageTasks.map((task) => (
+                          <div key={task.id} className="grid gap-2 border-b px-3 py-3 last:border-b-0 lg:grid-cols-[minmax(240px,2fr)_120px_130px_145px_minmax(170px,1fr)_80px] lg:items-center">
+                            <div><div className="flex flex-wrap items-center gap-2"><b className="text-sm">{task.title}</b><span className={`rounded-full px-2 py-0.5 text-[11px] ${priorityStyle(task.priority)}`}>{task.priority}</span>{task.deadline < todayIso() && !isTaskCompleted(task) && <span className="rounded-full bg-rose-100 px-2 py-0.5 text-[11px] text-rose-700">Просрочено</span>}</div>{task.result && <p className="mt-1 text-xs text-slate-500">Результат: {task.result}</p>}</div>
+                            <span className="text-sm">{formatDate(task.deadline)}</span>
+                            <span className="text-sm font-medium">{task.owner}</span>
+                            <select value={task.status} onChange={(event) => updateTaskStatus(task.id, event.target.value)} className={`rounded-xl border-0 px-2 py-1.5 text-sm ${statusStyle(task.status)}`}>{TASK_STATUSES.map((status) => <option key={status}>{status}</option>)}</select>
+                            <div className="min-w-0 text-sm text-slate-600"><span className="line-clamp-2">{task.comment || '—'}</span><TaskResourceLink url={task.resource_url} compact /></div>
+                            <button type="button" onClick={() => openTaskModal(task)} className="rounded-lg bg-violet-50 p-2 text-violet-700"><Edit3 className="h-4 w-4" /></button>
+                          </div>
+                        ))}
+                        {stageTasks.length === 0 && <div className="p-4 text-center text-sm text-slate-500">По выбранному фильтру задач нет.</div>}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+
+              {tasksWithoutStage.length > 0 && (
+                <div className="overflow-hidden rounded-xl border border-dashed border-amber-200 bg-amber-50/40">
+                  <div className="px-3 py-2 text-sm font-semibold text-amber-900">Задачи проекта без этапа</div>
+                  {tasksWithoutStage.map((task) => <button key={task.id} type="button" onClick={() => openTaskModal(task)} className="flex w-full items-center justify-between border-t bg-white px-3 py-2 text-left text-sm hover:bg-slate-50"><span><b>{task.title}</b><span className="ml-2 text-xs text-slate-500">{task.owner} · {formatDate(task.deadline)}</span></span><span className={`rounded-full px-2 py-0.5 text-[11px] ${statusStyle(task.status)}`}>{task.status}</span></button>)}
+                </div>
+              )}
+
+              {projectStages.length === 0 && tasksWithoutStage.length === 0 && <div className="rounded-xl border border-dashed p-4 text-center text-sm text-slate-500">В проекте ещё нет этапов и задач.</div>}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(124,58,237,0.18),_transparent_32%),radial-gradient(circle_at_top_right,_rgba(14,165,233,0.16),_transparent_28%),linear-gradient(180deg,_#f8fafc_0%,_#eef2ff_45%,_#f8fafc_100%)] p-4 text-slate-900 md:p-8">
       <div className="mx-auto max-w-[1500px] space-y-6">
@@ -1505,10 +1651,10 @@ export default function App() {
               <div className="mb-3 inline-flex items-center rounded-full bg-white/10 px-3 py-1 text-xs font-medium text-violet-100 ring-1 ring-white/10">
                 <Sparkles className="mr-2 h-3.5 w-3.5" /> MAVIS GROUP · центр проектов
               </div>
-              <h1 className="text-3xl font-bold tracking-tight md:text-4xl">Проекты, этапы, задачи и переносы сроков</h1>
-              <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-300 md:text-base">Разбивайте большой проект на этапы, назначайте задачи и отдельно контролируйте всё, что перенесли с текущей недели.</p>
+              <h1 className="text-3xl font-bold tracking-tight md:text-4xl">Разделы → проекты → этапы → задачи</h1>
+              <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-300 md:text-base">Собирайте проекты по направлениям, управляйте стадиями и показывайте только нужные статусы задач без потери общей истории.</p>
               <div className="mt-5 flex flex-wrap gap-2 text-xs text-slate-200">
-                <span className="rounded-full bg-violet-500/20 px-3 py-1.5 ring-1 ring-violet-400/20">{projects.length} проектов</span>
+                <span className="rounded-full bg-cyan-500/20 px-3 py-1.5 ring-1 ring-cyan-400/20">{sections.length} разделов</span><span className="rounded-full bg-violet-500/20 px-3 py-1.5 ring-1 ring-violet-400/20">{projects.length} проектов</span>
                 <span className="rounded-full bg-sky-500/20 px-3 py-1.5 ring-1 ring-sky-400/20">{tasks.length} задач</span>
                 <span className="rounded-full bg-rose-500/20 px-3 py-1.5 ring-1 ring-rose-400/20">{currentWeekCarryovers.length} переносов с недели</span>
               </div>
@@ -1553,8 +1699,8 @@ export default function App() {
             <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
               <div className="flex flex-wrap gap-2 rounded-2xl bg-slate-100 p-1">
                 {[
-                  ['projects', 'Проекты', FolderKanban],
-                  ['sections', 'Разделы', Layers3],
+                  ['sections', 'Структура', Layers3],
+                  ['projects', 'Все проекты', FolderKanban],
                   ['calendar', 'Календарь', CalendarDays],
                   ['tasks', 'Все задачи', ListChecks],
                   ['transfers', 'Переносы', History],
@@ -1569,11 +1715,12 @@ export default function App() {
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
                 <div className="relative">
                   <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
-                  <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Поиск по проектам и задачам" className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 pl-9 text-sm sm:w-64" />
+                  <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Поиск по разделам, проектам и задачам" className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 pl-9 text-sm sm:w-64" />
                 </div>
                 <select value={selectedEmployee} onChange={(event) => setSelectedEmployee(event.target.value)} className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm">
                   <option>Все</option>{employeeNames.map((name) => <option key={name}>{name}</option>)}
                 </select>
+                <button type="button" onClick={resetAllFilters} className="inline-flex items-center justify-center rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-medium text-rose-700 hover:bg-rose-100"><X className="mr-1.5 h-4 w-4" />Сбросить все фильтры</button>
               </div>
             </div>
 
@@ -1590,6 +1737,12 @@ export default function App() {
                   ))}
                 </div>
                 <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                  <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)} className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm">
+                    <option value="all">Все статусы</option>
+                    <option value="active">Только активные</option>
+                    <option value="completed">Только готовые</option>
+                    {TASK_STATUSES.map((status) => <option key={status} value={status}>{status}</option>)}
+                  </select>
                   <select value={dateFilterMode} onChange={(event) => setDateFilterMode(event.target.value)} className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm">
                     <option value="all">Все даты</option>
                     <option value="day">Конкретная дата</option>
@@ -1605,7 +1758,7 @@ export default function App() {
                     />
                   )}
                   <span className="rounded-xl bg-violet-50 px-3 py-2 text-xs font-medium text-violet-700">{dateFilterCaption(dateFilterMode, dateFilterDate)}</span>
-                  {(dateFilterMode !== 'all' || taskFilter !== 'all') && <button type="button" onClick={() => { setDateFilterMode('all'); setTaskFilter('all'); }} className="rounded-xl border px-3 py-2 text-xs font-medium text-slate-600 hover:bg-slate-50">Сбросить</button>}
+                  <button type="button" onClick={resetAllFilters} className="rounded-xl border px-3 py-2 text-xs font-medium text-slate-600 hover:bg-slate-50">Сбросить всё</button>
                 </div>
               </div>
             )}
@@ -1624,7 +1777,7 @@ export default function App() {
         {activeTab === 'projects' && (
           <div className="space-y-5">
             <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-              <div><h2 className="text-2xl font-bold">Проекты</h2><p className="text-sm text-slate-500">Раскрывайте проект → этап → задачи. Прогресс считается автоматически.</p></div>
+              <div><h2 className="text-2xl font-bold">Проекты</h2><p className="text-sm text-slate-500">Плоский список всех проектов. Раздел можно изменить прямо в карточке проекта.</p></div>
               <div className="flex flex-wrap gap-2">
                 <label className="inline-flex cursor-pointer items-center rounded-2xl border border-sky-200 bg-sky-50 px-4 py-2.5 text-sm font-medium text-sky-700 hover:bg-sky-100"><FileUp className="mr-2 h-4 w-4" />Импорт таблицы<input type="file" accept=".xlsx,.xls" className="hidden" onChange={importProjectTable} /></label>
                 <button type="button" onClick={() => openProjectModal()} className="inline-flex items-center rounded-2xl bg-emerald-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-emerald-500"><FolderPlus className="mr-2 h-4 w-4" />Новый проект</button>
@@ -1653,7 +1806,7 @@ export default function App() {
                         {expanded ? <ChevronUp className="mt-2 h-5 w-5 text-slate-400" /> : <ChevronDown className="mt-2 h-5 w-5 text-slate-400" />}
                       </button>
                       <div className="flex flex-wrap gap-2 text-sm">
-                        <span className="rounded-xl bg-slate-100 px-3 py-2"><b>Ответственный: {project.owner}</b> · {project.deadline ? formatDate(project.deadline) : 'без общего срока'}</span>{project.customer && <span className="rounded-xl bg-amber-50 px-3 py-2 text-amber-800"><b>Заказчик:</b> {project.customer}</span>}
+                        <span className="rounded-xl bg-slate-100 px-3 py-2"><b>Ответственный: {project.owner}</b> · {project.deadline ? formatDate(project.deadline) : 'без общего срока'}</span><select value={project.section_id || ''} onChange={(event) => moveProjectToSection(project, event.target.value)} className="rounded-xl border border-cyan-200 bg-cyan-50 px-3 py-2 text-sm font-medium text-cyan-800"><option value="">Без раздела</option>{sections.map((section) => <option key={section.id} value={section.id}>{section.name}</option>)}</select>{project.customer && <span className="rounded-xl bg-amber-50 px-3 py-2 text-amber-800"><b>Заказчик:</b> {project.customer}</span>}
                         <span className="rounded-xl bg-slate-100 px-3 py-2">{projectStages.length} этапов · {allProjectTasks.length} задач</span>
                         <button type="button" onClick={() => openStageModal(project.id)} className="inline-flex items-center rounded-xl bg-sky-50 px-3 py-2 font-medium text-sky-700 hover:bg-sky-100"><Layers3 className="mr-1.5 h-4 w-4" />Этап</button>
                         <button type="button" onClick={() => openTaskModal(null, project.id)} className="inline-flex items-center rounded-xl bg-violet-50 px-3 py-2 font-medium text-violet-700 hover:bg-violet-100"><Plus className="mr-1.5 h-4 w-4" />Задача</button>
@@ -1733,43 +1886,69 @@ export default function App() {
         {activeTab === 'sections' && (
           <div className="space-y-5">
             <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-              <div><h2 className="text-2xl font-bold">Разделы задач</h2><p className="text-sm text-slate-500">Для регулярной и операционной работы, которая не относится к отдельному проекту.</p></div>
-              <button type="button" onClick={() => openSectionModal()} className="inline-flex items-center justify-center rounded-2xl bg-cyan-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-cyan-500"><Layers3 className="mr-2 h-4 w-4" />Новый раздел</button>
+              <div><h2 className="text-2xl font-bold">Структура работы</h2><p className="text-sm text-slate-500">Иерархия: раздел → проекты → этапы → задачи. В каждом разделе можно отдельно выбрать, какие статусы задач показывать.</p></div>
+              <div className="flex flex-wrap gap-2"><button type="button" onClick={() => openSectionModal()} className="inline-flex items-center justify-center rounded-2xl bg-cyan-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-cyan-500"><Layers3 className="mr-2 h-4 w-4" />Новый раздел</button><button type="button" onClick={() => openProjectModal()} className="inline-flex items-center justify-center rounded-2xl bg-emerald-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-emerald-500"><FolderPlus className="mr-2 h-4 w-4" />Новый проект</button></div>
             </div>
 
-            <div className="grid gap-4 xl:grid-cols-2">
-              {filteredSections.map((section) => {
-                const allSectionTasks = tasks.filter((task) => String(task.section_id) === String(section.id));
-                const sectionTasks = filteredTasks.filter((task) => String(task.section_id) === String(section.id));
-                const progress = calculateProgress(allSectionTasks);
-                return (
-                  <Card key={section.id} className="overflow-hidden">
-                    <div className="h-2" style={{ backgroundColor: section.color }} />
-                    <div className="p-5">
-                      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-3"><span className="rounded-2xl p-2.5 text-white" style={{ backgroundColor: section.color }}><Layers3 className="h-5 w-5" /></span><div><h3 className="text-xl font-bold">{section.name}</h3><p className="text-sm text-slate-500">{section.description || 'Описание раздела не заполнено'}</p></div></div>
-                          <div className="mt-4"><ProgressBar value={progress} color={section.color} /></div>
-                          <div className="mt-3 flex flex-wrap gap-2 text-xs"><span className="rounded-lg bg-slate-100 px-2.5 py-1.5"><b>Ответственный:</b> {section.owner}</span><span className="rounded-lg bg-slate-100 px-2.5 py-1.5">{allSectionTasks.length} задач</span></div>
-                        </div>
-                        <div className="flex gap-2"><button type="button" onClick={() => openTaskModal(null, '', '', section.id)} className="inline-flex items-center rounded-xl bg-violet-50 px-3 py-2 text-sm font-medium text-violet-700 hover:bg-violet-100"><Plus className="mr-1.5 h-4 w-4" />Задача</button><button type="button" onClick={() => openSectionModal(section)} className="rounded-xl border p-2 text-slate-600 hover:bg-slate-50"><Edit3 className="h-4 w-4" /></button><button type="button" onClick={() => deleteSection(section)} className="rounded-xl border border-rose-100 p-2 text-rose-600 hover:bg-rose-50"><Trash2 className="h-4 w-4" /></button></div>
-                      </div>
-
-                      <div className="mt-5 space-y-2">
-                        {sectionTasks.map((task) => (
-                          <div key={task.id} className="flex flex-col gap-3 rounded-2xl border bg-white p-3 sm:flex-row sm:items-center sm:justify-between">
-                            <button type="button" onClick={() => openTaskModal(task)} className="min-w-0 flex-1 text-left"><div className="flex flex-wrap items-center gap-2"><b>{task.title}</b><span className={`rounded-full px-2 py-0.5 text-[11px] ${statusStyle(task.status)}`}>{task.status}</span><span className={`rounded-full px-2 py-0.5 text-[11px] ${priorityStyle(task.priority)}`}>{task.priority}</span></div><p className="mt-1 text-xs text-slate-500">{task.owner} · {formatDate(task.deadline)} · {formatTime(task.start_time)}</p>{task.comment && <p className="mt-1 line-clamp-2 text-sm text-slate-600">{task.comment}</p>}</button>
-                            <div className="flex items-center gap-2"><TaskResourceLink url={task.resource_url} compact /><button type="button" onClick={() => openTaskModal(task)} className="rounded-lg bg-violet-50 p-2 text-violet-700"><Edit3 className="h-4 w-4" /></button></div>
-                          </div>
-                        ))}
-                        {sectionTasks.length === 0 && <div className="rounded-2xl border border-dashed p-5 text-center text-sm text-slate-500">В этом разделе нет задач по выбранным фильтрам.</div>}
+            {filteredSections.map((section) => {
+              const sectionProjects = filteredProjects.filter((project) => String(project.section_id) === String(section.id));
+              const allSectionProjects = projects.filter((project) => String(project.section_id) === String(section.id));
+              const projectIds = new Set(allSectionProjects.map((project) => String(project.id)));
+              const allSectionTasks = tasks.filter((task) => projectIds.has(String(task.project_id)) || (!task.project_id && String(task.section_id) === String(section.id)));
+              const directSectionTasks = filteredTasks.filter((task) => !task.project_id && String(task.section_id) === String(section.id));
+              const localStatusMode = sectionStatusFilters[section.id] || 'active';
+              const visibleDirectTasks = directSectionTasks.filter((task) => matchesLocalTaskStatus(task, localStatusMode));
+              const progress = calculateProgress(allSectionTasks);
+              const sectionExpanded = expandedSections[section.id] !== false;
+              return (
+                <Card key={section.id} className="overflow-hidden">
+                  <div className="h-2" style={{ backgroundColor: section.color }} />
+                  <div className="p-5 md:p-6">
+                    <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+                      <button type="button" onClick={() => setExpandedSections((previous) => ({ ...previous, [section.id]: !sectionExpanded }))} className="flex min-w-0 flex-1 items-start gap-3 text-left">
+                        <span className="rounded-2xl p-2.5 text-white" style={{ backgroundColor: section.color }}><Layers3 className="h-5 w-5" /></span>
+                        <span className="min-w-0 flex-1"><span className="flex flex-wrap items-center gap-2"><h3 className="text-xl font-bold">{section.name}</h3><span className="rounded-full bg-cyan-50 px-3 py-1 text-xs font-medium text-cyan-800">{allSectionProjects.length} проектов</span></span><span className="mt-1 block text-sm text-slate-500">{section.description || 'Описание раздела не заполнено'}</span><span className="mt-3 block max-w-xl"><ProgressBar value={progress} color={section.color} /></span></span>
+                        {sectionExpanded ? <ChevronUp className="mt-2 h-5 w-5 text-slate-400" /> : <ChevronDown className="mt-2 h-5 w-5 text-slate-400" />}
+                      </button>
+                      <div className="flex flex-wrap items-center gap-2 text-sm">
+                        <span className="rounded-xl bg-slate-100 px-3 py-2"><b>Ответственный:</b> {section.owner}</span>
+                        <span className="rounded-xl bg-slate-100 px-3 py-2">{allSectionTasks.filter((task) => !isTaskCompleted(task)).length} активных · {allSectionTasks.length} всего</span>
+                        <select value={localStatusMode} onChange={(event) => setSectionStatusFilters((previous) => ({ ...previous, [section.id]: event.target.value }))} className="rounded-xl border border-violet-200 bg-violet-50 px-3 py-2 text-sm font-medium text-violet-800"><option value="active">Активные задачи</option><option value="all">Все задачи</option><option value="completed">Только готовые</option>{TASK_STATUSES.map((status) => <option key={status} value={status}>{status}</option>)}</select>
+                        <button type="button" onClick={() => openProjectModal(null, section.id)} className="inline-flex items-center rounded-xl bg-emerald-50 px-3 py-2 font-medium text-emerald-700"><FolderPlus className="mr-1.5 h-4 w-4" />Проект</button>
+                        <button type="button" onClick={() => openSectionModal(section)} className="rounded-xl border p-2 text-slate-600"><Edit3 className="h-4 w-4" /></button>
+                        <button type="button" onClick={() => deleteSection(section)} className="rounded-xl border border-rose-100 p-2 text-rose-600"><Trash2 className="h-4 w-4" /></button>
                       </div>
                     </div>
-                  </Card>
-                );
-              })}
-            </div>
-            {filteredSections.length === 0 && <Card><div className="p-10 text-center"><Layers3 className="mx-auto h-10 w-10 text-cyan-500" /><h3 className="mt-3 text-lg font-semibold">Разделов пока нет</h3><p className="mt-1 text-sm text-slate-500">Создайте, например: «Регулярные задачи», «Отчётность», «Команда» или «Административные задачи».</p><button type="button" onClick={() => openSectionModal()} className="mt-4 rounded-2xl bg-cyan-600 px-5 py-3 text-sm font-medium text-white">Создать раздел</button></div></Card>}
+
+                    {sectionExpanded && (
+                      <div className="mt-6 space-y-4">
+                        {sectionProjects.map((project) => renderHierarchyProject(project, localStatusMode))}
+                        {sectionProjects.length === 0 && <div className="rounded-2xl border border-dashed bg-slate-50 p-6 text-center text-sm text-slate-500">В этом разделе нет проектов по выбранным общим фильтрам. Создайте проект или выберите раздел в карточке существующего проекта.</div>}
+
+                        {visibleDirectTasks.length > 0 && (
+                          <div className="rounded-2xl border border-dashed border-cyan-200 bg-cyan-50/40 p-4">
+                            <div className="mb-3 flex items-center justify-between"><div><b>Отдельные задачи без проекта</b><p className="text-xs text-slate-500">Сохранены для совместимости. Для новых крупных работ лучше создавать проект.</p></div><button type="button" onClick={() => openTaskModal(null, '', '', section.id)} className="rounded-xl bg-violet-600 px-3 py-2 text-xs font-medium text-white">+ Задача</button></div>
+                            <div className="space-y-2">{visibleDirectTasks.map((task) => <button key={task.id} type="button" onClick={() => openTaskModal(task)} className="flex w-full items-center justify-between rounded-xl border bg-white p-3 text-left hover:border-violet-200"><span><b>{task.title}</b><span className="mt-1 block text-xs text-slate-500">{task.owner} · {formatDate(task.deadline)}</span></span><span className={`rounded-full px-2 py-0.5 text-[11px] ${statusStyle(task.status)}`}>{task.status}</span></button>)}</div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </Card>
+              );
+            })}
+
+            {filteredProjects.filter((project) => !project.section_id).length > 0 && (
+              <Card className="overflow-hidden border-amber-200">
+                <div className="h-2 bg-amber-500" />
+                <div className="p-5 md:p-6">
+                  <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between"><div><h3 className="text-xl font-bold">Проекты без раздела</h3><p className="text-sm text-slate-500">Выберите раздел в выпадающем списке проекта — перенос сохранится без изменения этапов и задач.</p></div><span className="rounded-xl bg-amber-50 px-3 py-2 text-sm font-medium text-amber-800">{filteredProjects.filter((project) => !project.section_id).length} проектов</span></div>
+                  <div className="mt-5 space-y-4">{filteredProjects.filter((project) => !project.section_id).map((project) => renderHierarchyProject(project, sectionStatusFilters.unassigned || 'active'))}</div>
+                </div>
+              </Card>
+            )}
+
+            {sections.length === 0 && <Card><div className="p-10 text-center"><Layers3 className="mx-auto h-10 w-10 text-cyan-500" /><h3 className="mt-3 text-lg font-semibold">Создайте первый раздел</h3><p className="mt-1 text-sm text-slate-500">Например: «Продажи», «Экспертный отдел», «Маркетинг», «Автоматизация» или «Финансы».</p><button type="button" onClick={() => openSectionModal()} className="mt-4 rounded-2xl bg-cyan-600 px-5 py-3 text-sm font-medium text-white">Создать раздел</button></div></Card>}
           </div>
         )}
 
@@ -1787,7 +1966,7 @@ export default function App() {
               <div className="space-y-3">{filteredTasks.map((task) => {
                 const project = projectById.get(String(task.project_id));
                 const stage = stageById.get(String(task.stage_id));
-                return <div key={task.id} className="rounded-2xl border bg-white p-4 hover:border-violet-200 hover:shadow-sm"><div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between"><div className="space-y-2"><div className="flex flex-wrap gap-2"><span className={`rounded-full px-3 py-1 text-xs ${statusStyle(task.status)}`}>{task.status}</span><span className={`rounded-full px-3 py-1 text-xs ${priorityStyle(task.priority)}`}>{task.priority}</span>{project && <span className="rounded-full bg-violet-50 px-3 py-1 text-xs text-violet-700">{project.name}</span>}{stage && <span className="rounded-full bg-sky-50 px-3 py-1 text-xs text-sky-700">{stage.title}</span>}{sectionById.get(String(task.section_id)) && <span className="rounded-full bg-cyan-50 px-3 py-1 text-xs text-cyan-700">{sectionById.get(String(task.section_id)).name}</span>}</div><h3 className="text-lg font-semibold">{task.title}</h3><p className="text-sm text-slate-600"><b>Комментарий:</b> {task.comment || '—'}</p>{task.resource_url && <TaskResourceLink url={task.resource_url} />}<p className="text-sm text-slate-500">{task.owner} · {formatDate(task.deadline)} · {formatTime(task.start_time)}{task.end_time ? `–${formatTime(task.end_time)}` : ''} · {task.hours} ч</p></div><div className="flex flex-wrap gap-2"><select value={task.status} onChange={(event) => updateTaskStatus(task.id, event.target.value)} className={`rounded-xl border-0 px-3 py-2 text-sm ${statusStyle(task.status)}`}>{TASK_STATUSES.map((status) => <option key={status}>{status}</option>)}</select><button type="button" onClick={() => openTaskModal(task)} className="inline-flex items-center rounded-xl bg-violet-50 px-3 py-2 text-sm font-medium text-violet-700"><Edit3 className="mr-2 h-4 w-4" />Изменить</button><button type="button" onClick={() => deleteTask(task)} className="rounded-xl border border-rose-100 px-3 py-2 text-rose-600"><Trash2 className="h-4 w-4" /></button></div></div></div>;
+                return <div key={task.id} className="rounded-2xl border bg-white p-4 hover:border-violet-200 hover:shadow-sm"><div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between"><div className="space-y-2"><div className="flex flex-wrap gap-2"><span className={`rounded-full px-3 py-1 text-xs ${statusStyle(task.status)}`}>{task.status}</span><span className={`rounded-full px-3 py-1 text-xs ${priorityStyle(task.priority)}`}>{task.priority}</span>{project && <span className="rounded-full bg-violet-50 px-3 py-1 text-xs text-violet-700">{project.name}</span>}{stage && <span className="rounded-full bg-sky-50 px-3 py-1 text-xs text-sky-700">{stage.title}</span>}{sectionById.get(String(project?.section_id || task.section_id)) && <span className="rounded-full bg-cyan-50 px-3 py-1 text-xs text-cyan-700">{sectionById.get(String(project?.section_id || task.section_id)).name}</span>}</div><h3 className="text-lg font-semibold">{task.title}</h3><p className="text-sm text-slate-600"><b>Комментарий:</b> {task.comment || '—'}</p>{task.resource_url && <TaskResourceLink url={task.resource_url} />}<p className="text-sm text-slate-500">{task.owner} · {formatDate(task.deadline)} · {formatTime(task.start_time)}{task.end_time ? `–${formatTime(task.end_time)}` : ''} · {task.hours} ч</p></div><div className="flex flex-wrap gap-2"><select value={task.status} onChange={(event) => updateTaskStatus(task.id, event.target.value)} className={`rounded-xl border-0 px-3 py-2 text-sm ${statusStyle(task.status)}`}>{TASK_STATUSES.map((status) => <option key={status}>{status}</option>)}</select><button type="button" onClick={() => openTaskModal(task)} className="inline-flex items-center rounded-xl bg-violet-50 px-3 py-2 text-sm font-medium text-violet-700"><Edit3 className="mr-2 h-4 w-4" />Изменить</button><button type="button" onClick={() => deleteTask(task)} className="rounded-xl border border-rose-100 px-3 py-2 text-rose-600"><Trash2 className="h-4 w-4" /></button></div></div></div>;
               })}{filteredTasks.length === 0 && <div className="rounded-2xl border border-dashed p-8 text-center text-slate-500">По выбранным фильтрам задач нет.</div>}</div>
             </div>
           </Card>
@@ -1821,8 +2000,8 @@ export default function App() {
 
         {activeTab === 'team' && (
           <div className="grid gap-5 xl:grid-cols-[1.1fr_1fr]">
-            <Card><div className="p-5"><div className="mb-5 flex items-center justify-between"><div><h2 className="text-xl font-semibold">Команда</h2><p className="text-sm text-slate-500">Сотрудники доступны в проектах, этапах и задачах.</p></div><button type="button" onClick={() => setIsEmployeeModalOpen(true)} className="inline-flex items-center rounded-xl bg-sky-600 px-4 py-2 text-sm font-medium text-white"><UserPlus className="mr-2 h-4 w-4" />Добавить</button></div><div className="grid gap-3 sm:grid-cols-2">{employees.map((employee) => { const personTasks = tasks.filter((task) => task.owner === employee.name); return <div key={employee.id} className="rounded-2xl border p-4"><div className="flex items-start justify-between gap-3"><div className="flex items-center gap-3"><span className="flex h-11 w-11 items-center justify-center rounded-2xl text-sm font-bold text-white" style={{ backgroundColor: employee.color }}>{employeeInitials(employee.name)}</span><div><b>{employee.name}</b><p className="text-sm text-slate-500">{employee.role}</p></div></div><button type="button" onClick={() => deleteEmployee(employee)} className="rounded-lg p-2 text-rose-500 hover:bg-rose-50" title="Удалить сотрудника"><Trash2 className="h-4 w-4" /></button></div><div className="mt-4 flex gap-2 text-xs"><span className="rounded-lg bg-slate-100 px-2.5 py-1.5">{personTasks.length} задач</span><span className="rounded-lg bg-emerald-50 px-2.5 py-1.5 text-emerald-700">{personTasks.filter((task) => task.status === 'Готово').length} готово</span></div></div>; })}</div></div></Card>
-            <Card><div className="p-5"><h2 className="flex items-center text-xl font-semibold"><BarChart3 className="mr-2 h-5 w-5" />Загрузка активными задачами</h2><p className="mb-4 text-sm text-slate-500">Сумма часов по незавершённым задачам.</p><div className="h-[360px]"><ResponsiveContainer width="100%" height="100%"><BarChart data={workload} layout="vertical" margin={{ left: 15, right: 25 }}><XAxis type="number" /><YAxis dataKey="name" type="category" width={90} /><Tooltip formatter={(value, name, props) => [`${value} ч · ${props.payload.tasks} задач`, 'Загрузка']} /><Bar dataKey="hours" radius={[0, 10, 10, 0]}>{workload.map((entry) => <Cell key={entry.name} fill={entry.color} />)}</Bar></BarChart></ResponsiveContainer></div></div></Card>
+            <Card><div className="p-5"><div className="mb-5 flex items-center justify-between"><div><h2 className="text-xl font-semibold">Команда</h2><p className="text-sm text-slate-500">Главный показатель — количество активных задач у сотрудника.</p></div><button type="button" onClick={() => setIsEmployeeModalOpen(true)} className="inline-flex items-center rounded-xl bg-sky-600 px-4 py-2 text-sm font-medium text-white"><UserPlus className="mr-2 h-4 w-4" />Добавить</button></div><div className="grid gap-3 sm:grid-cols-2">{employees.map((employee) => { const allPersonTasks = tasks.filter((task) => task.owner === employee.name); const activePersonTasks = allPersonTasks.filter((task) => !isTaskCompleted(task)); const overduePersonTasks = activePersonTasks.filter((task) => task.deadline < todayIso()); return <div key={employee.id} className="rounded-2xl border p-4"><div className="flex items-start justify-between gap-3"><div className="flex items-center gap-3"><span className="flex h-11 w-11 items-center justify-center rounded-2xl text-sm font-bold text-white" style={{ backgroundColor: employee.color }}>{employeeInitials(employee.name)}</span><div><b>{employee.name}</b><p className="text-sm text-slate-500">{employee.role}</p></div></div><button type="button" onClick={() => deleteEmployee(employee)} className="rounded-lg p-2 text-rose-500 hover:bg-rose-50" title="Удалить сотрудника"><Trash2 className="h-4 w-4" /></button></div><div className="mt-4 grid grid-cols-3 gap-2 text-center text-xs"><span className="rounded-lg bg-violet-50 px-2 py-2 text-violet-800"><b className="block text-lg">{activePersonTasks.length}</b>активных</span><span className="rounded-lg bg-rose-50 px-2 py-2 text-rose-700"><b className="block text-lg">{overduePersonTasks.length}</b>просрочено</span><span className="rounded-lg bg-slate-100 px-2 py-2 text-slate-700"><b className="block text-lg">{allPersonTasks.length}</b>всего</span></div></div>; })}</div></div></Card>
+            <Card><div className="p-5"><h2 className="flex items-center text-xl font-semibold"><BarChart3 className="mr-2 h-5 w-5" />Загрузка по количеству задач</h2><p className="mb-4 text-sm text-slate-500">Количество незавершённых задач у каждого сотрудника. Часы в расчёте не используются.</p><div className="h-[360px]"><ResponsiveContainer width="100%" height="100%"><BarChart data={workload} layout="vertical" margin={{ left: 15, right: 25 }}><XAxis type="number" allowDecimals={false} /><YAxis dataKey="name" type="category" width={90} /><Tooltip formatter={(value, name, props) => [`${value} активных · ${props.payload.overdue} просрочено`, 'Загрузка']} /><Bar dataKey="tasks" radius={[0, 10, 10, 0]}>{workload.map((entry) => <Cell key={entry.name} fill={entry.color} />)}</Bar></BarChart></ResponsiveContainer></div></div></Card>
           </div>
         )}
       </div>
@@ -1831,6 +2010,7 @@ export default function App() {
         <Modal title={editingProjectId ? 'Редактирование проекта' : 'Новый проект'} subtitle="Общий контейнер для этапов и задач." onClose={() => setIsProjectModalOpen(false)} maxWidth="max-w-2xl">
           <div className="grid gap-4 md:grid-cols-2">
             <Field label="Название проекта" className="md:col-span-2"><input value={projectForm.name} onChange={(event) => setProjectForm({ ...projectForm, name: event.target.value })} placeholder="Например: ИИ-ассистент экспертного отдела" className="w-full rounded-2xl border px-3 py-2.5" /></Field>
+            <Field label="Раздел"><select value={projectForm.section_id} onChange={(event) => setProjectForm({ ...projectForm, section_id: event.target.value })} className="w-full rounded-2xl border bg-white px-3 py-2.5"><option value="">Без раздела</option>{sections.map((section) => <option key={section.id} value={section.id}>{section.name}</option>)}</select></Field>
             <Field label="Ответственный за проект"><select value={projectForm.owner} onChange={(event) => setProjectForm({ ...projectForm, owner: event.target.value })} className="w-full rounded-2xl border bg-white px-3 py-2.5">{employeeNames.map((name) => <option key={name}>{name}</option>)}</select></Field>
             <Field label="Заказчик проекта"><input value={projectForm.customer} onChange={(event) => setProjectForm({ ...projectForm, customer: event.target.value })} placeholder="Например: Виктория, отдел продаж или внешний клиент" className="w-full rounded-2xl border px-3 py-2.5" /></Field>
             <Field label="Общий дедлайн"><input type="date" value={projectForm.deadline} onChange={(event) => setProjectForm({ ...projectForm, deadline: event.target.value })} className="w-full rounded-2xl border px-3 py-2.5" /></Field>
@@ -1857,24 +2037,24 @@ export default function App() {
       )}
 
       {isSectionModalOpen && (
-        <Modal title={editingSectionId ? 'Редактирование раздела' : 'Новый раздел'} subtitle="Раздел объединяет регулярные и операционные задачи вне проектов." onClose={() => setIsSectionModalOpen(false)} maxWidth="max-w-2xl">
+        <Modal title={editingSectionId ? 'Редактирование раздела' : 'Новый раздел'} subtitle="Раздел объединяет проекты одного направления." onClose={() => setIsSectionModalOpen(false)} maxWidth="max-w-2xl">
           <div className="grid gap-4 md:grid-cols-2">
-            <Field label="Название раздела" className="md:col-span-2"><input value={sectionForm.name} onChange={(event) => setSectionForm({ ...sectionForm, name: event.target.value })} placeholder="Например: Регулярная отчётность" className="w-full rounded-2xl border px-3 py-2.5" /></Field>
+            <Field label="Название раздела" className="md:col-span-2"><input value={sectionForm.name} onChange={(event) => setSectionForm({ ...sectionForm, name: event.target.value })} placeholder="Например: Продажи, Производство, Маркетинг или Автоматизация" className="w-full rounded-2xl border px-3 py-2.5" /></Field>
             <Field label="Ответственный за раздел"><select value={sectionForm.owner} onChange={(event) => setSectionForm({ ...sectionForm, owner: event.target.value })} className="w-full rounded-2xl border bg-white px-3 py-2.5">{employeeNames.map((name) => <option key={name}>{name}</option>)}</select></Field>
             <Field label="Цвет раздела"><div className="flex flex-wrap gap-2">{SECTION_COLORS.map((color) => <button key={color} type="button" onClick={() => setSectionForm({ ...sectionForm, color })} className={`h-9 w-9 rounded-full ${sectionForm.color === color ? 'ring-2 ring-slate-900 ring-offset-2' : ''}`} style={{ backgroundColor: color }} />)}</div></Field>
-            <Field label="Описание" className="md:col-span-2"><textarea value={sectionForm.description} onChange={(event) => setSectionForm({ ...sectionForm, description: event.target.value })} rows="3" placeholder="Какие задачи относятся к этому разделу" className="w-full rounded-2xl border px-3 py-2.5" /></Field>
+            <Field label="Описание" className="md:col-span-2"><textarea value={sectionForm.description} onChange={(event) => setSectionForm({ ...sectionForm, description: event.target.value })} rows="3" placeholder="Какие проекты и процессы относятся к этому разделу" className="w-full rounded-2xl border px-3 py-2.5" /></Field>
           </div>
           <ModalActions onCancel={() => setIsSectionModalOpen(false)} onSave={saveSection} saveLabel={editingSectionId ? 'Сохранить раздел' : 'Создать раздел'} />
         </Modal>
       )}
 
       {isTaskModalOpen && (
-        <Modal title={editingTaskId ? 'Редактирование задачи' : 'Новая задача'} subtitle="Задачу можно привязать к проекту и этапу либо к отдельному рабочему разделу." onClose={() => setIsTaskModalOpen(false)} maxWidth="max-w-3xl">
+        <Modal title={editingTaskId ? 'Редактирование задачи' : 'Новая задача'} subtitle="Основная структура: раздел → проект → этап → задача. Для старых операционных задач сохранена прямая привязка к разделу." onClose={() => setIsTaskModalOpen(false)} maxWidth="max-w-3xl">
           <div className="grid gap-4 md:grid-cols-2">
             <Field label="Задача" className="md:col-span-2"><input value={taskForm.title} onChange={(event) => setTaskForm({ ...taskForm, title: event.target.value })} placeholder="Конкретное действие и ожидаемый результат" className="w-full rounded-2xl border px-3 py-2.5" /></Field>
             <Field label="Проект"><select value={taskForm.project_id} onChange={(event) => setTaskForm({ ...taskForm, project_id: event.target.value, stage_id: '', section_id: event.target.value ? '' : taskForm.section_id })} className="w-full rounded-2xl border bg-white px-3 py-2.5"><option value="">Без проекта</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></Field>
             <Field label="Этап"><select value={taskForm.stage_id} onChange={(event) => setTaskForm({ ...taskForm, stage_id: event.target.value })} disabled={!taskForm.project_id} className="w-full rounded-2xl border bg-white px-3 py-2.5 disabled:bg-slate-100"><option value="">Без этапа</option>{selectedProjectStages.map((stage) => <option key={stage.id} value={stage.id}>{stage.sort_order}. {stage.title}</option>)}</select></Field>
-            <Field label="Раздел" className="md:col-span-2"><select value={taskForm.section_id} onChange={(event) => setTaskForm({ ...taskForm, section_id: event.target.value, project_id: event.target.value ? '' : taskForm.project_id, stage_id: event.target.value ? '' : taskForm.stage_id })} className="w-full rounded-2xl border bg-white px-3 py-2.5"><option value="">Без раздела</option>{sections.map((section) => <option key={section.id} value={section.id}>{section.name}</option>)}</select><span className="mt-1 block text-xs text-slate-500">Раздел используется для регулярных и операционных задач вне проектов.</span></Field>
+            {!taskForm.project_id && <Field label="Раздел для задачи без проекта" className="md:col-span-2"><select value={taskForm.section_id} onChange={(event) => setTaskForm({ ...taskForm, section_id: event.target.value, project_id: event.target.value ? '' : taskForm.project_id, stage_id: event.target.value ? '' : taskForm.stage_id })} className="w-full rounded-2xl border bg-white px-3 py-2.5"><option value="">Без раздела</option>{sections.map((section) => <option key={section.id} value={section.id}>{section.name}</option>)}</select><span className="mt-1 block text-xs text-slate-500">Используйте только для отдельной задачи без проекта. Для обычной работы сначала выберите проект — его раздел определится автоматически.</span></Field>}
             <Field label="Ответственный"><select value={taskForm.owner} onChange={(event) => setTaskForm({ ...taskForm, owner: event.target.value })} className="w-full rounded-2xl border bg-white px-3 py-2.5">{employeeNames.map((name) => <option key={name}>{name}</option>)}</select></Field>
             <Field label="Дедлайн"><input type="date" value={taskForm.deadline} onChange={(event) => setTaskForm({ ...taskForm, deadline: event.target.value })} className="w-full rounded-2xl border px-3 py-2.5" /></Field>
             <Field label="Начало"><input type="time" value={taskForm.start_time} onChange={(event) => setTaskForm({ ...taskForm, start_time: event.target.value })} className="w-full rounded-2xl border px-3 py-2.5" /></Field>
