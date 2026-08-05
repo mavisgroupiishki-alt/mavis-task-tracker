@@ -53,6 +53,7 @@ import {
 } from 'lucide-react';
 import { Bar, BarChart, Cell, Legend, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { createClient } from '@supabase/supabase-js';
+import AiAssistantPanel from './AiAssistantPanel.jsx';
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
@@ -1745,6 +1746,65 @@ export default function App() {
     }
   }
 
+
+  async function createAiTasks(aiDrafts) {
+    const source = Array.isArray(aiDrafts) ? aiDrafts : [];
+    if (!source.length) throw new Error('Нет задач для создания.');
+
+    const payloads = source.map((draft) => {
+      const projectId = draft.project_id || null;
+      const selectedStage = draft.stage_id ? stageById.get(String(draft.stage_id)) : null;
+      const stageId = selectedStage && String(selectedStage.project_id) === String(projectId) ? selectedStage.id : null;
+      const sectionId = projectId ? null : (draft.section_id || null);
+      const details = [
+        draft.comment,
+        draft.evidence ? `Основание из встречи: ${draft.evidence}` : '',
+        Array.isArray(draft.warnings) && draft.warnings.length ? `Проверено вручную после предупреждений ИИ: ${draft.warnings.join(' · ')}` : '',
+        `Создано через ИИ-помощника ${new Date().toLocaleString('ru-RU')}.`,
+      ].filter(Boolean).join('\n\n');
+      return {
+        title: String(draft.title || '').trim(),
+        owner: draft.owner || currentUser?.employee_name || 'Аня',
+        deadline: draft.deadline || todayIso(),
+        period: 'day',
+        status: TASK_STATUSES.includes(draft.status) ? draft.status : 'Новая',
+        priority: PRIORITIES.includes(draft.priority) ? draft.priority : 'Средний',
+        hours: 1,
+        start_time: null,
+        end_time: null,
+        block: '',
+        result: String(draft.result || '').trim(),
+        comment: details,
+        resource_url: '',
+        project_id: projectId,
+        stage_id: stageId,
+        section_id: sectionId,
+      };
+    });
+
+    if (payloads.some((item) => !item.title || !item.owner || !item.deadline)) {
+      throw new Error('У каждой задачи должны быть название, ответственный и дедлайн.');
+    }
+
+    const canSaveRemote = supabase && payloads.every((item) =>
+      (!item.project_id || isRemoteId(item.project_id)) &&
+      (!item.stage_id || isRemoteId(item.stage_id)) &&
+      (!item.section_id || isRemoteId(item.section_id))
+    );
+
+    if (canSaveRemote) {
+      const { data, error } = await supabase.from('tasks').insert(payloads).select();
+      if (error) throw error;
+      setTasks((items) => [...(data || []).map(normalizeTask), ...items]);
+      setMessage(`ИИ-задачи созданы в общей базе: ${data?.length || payloads.length}.`);
+    } else {
+      const localTasks = payloads.map((payload, index) => normalizeTask({ ...payload, id: `local-ai-task-${Date.now()}-${index}` }));
+      setTasks((items) => [...localTasks, ...items]);
+      setMessage(`ИИ-задачи созданы локально: ${localTasks.length}.`);
+    }
+    setActiveTab('tasks');
+  }
+
   async function updateTaskStatus(taskId, status) {
     const previous = tasks;
     setTasks((items) => items.map((task) => String(task.id) === String(taskId) ? { ...task, status } : task));
@@ -2187,7 +2247,7 @@ export default function App() {
           <div className="flex flex-col gap-6 xl:flex-row xl:items-center xl:justify-between">
             <div className="max-w-3xl">
               <div className="mb-3 inline-flex items-center rounded-full bg-white/10 px-3 py-1 text-xs font-medium text-violet-100 ring-1 ring-white/10">
-                <Sparkles className="mr-2 h-3.5 w-3.5" /> MAVIS GROUP · центр проектов · версия 6.1
+                <Sparkles className="mr-2 h-3.5 w-3.5" /> MAVIS GROUP · центр проектов · версия 6.2
               </div>
               <h1 className="text-3xl font-bold tracking-tight md:text-4xl">Разделы → проекты → этапы → задачи</h1>
               <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-300 md:text-base">Собирайте проекты по направлениям, управляйте стадиями и показывайте только нужные статусы задач без потери общей истории.</p>
@@ -2240,6 +2300,7 @@ export default function App() {
                   ['projects', 'Проекты', FolderKanban],
                   ['calendar', 'Календарь', CalendarDays],
                   ['tasks', 'Задачи', ListChecks],
+                  ['ai', 'ИИ-помощник', Sparkles],
                   ['templates', 'Шаблоны', LayoutTemplate],
                   ['archive', 'Архив', Archive],
                   ['transfers', 'Переносы', History],
@@ -2332,6 +2393,8 @@ export default function App() {
               const projectStages = stages.filter((stage) => String(stage.project_id) === String(project.id)).sort((a, b) => a.sort_order - b.sort_order);
               const projectTasks = filteredTasks.filter((task) => String(task.project_id) === String(project.id));
               const allProjectTasks = tasks.filter((task) => String(task.project_id) === String(project.id));
+              const directProjectTasks = projectTasks.filter((task) => !task.stage_id);
+              const allDirectProjectTasks = allProjectTasks.filter((task) => !task.stage_id);
               const progress = calculateProgress(allProjectTasks);
               const derivedStatus = deriveStatus(allProjectTasks, project.status);
               const health = projectHealth(project, allProjectTasks);
@@ -2410,7 +2473,35 @@ export default function App() {
                             </div>
                           );
                         })}
-                        {projectStages.length === 0 && <div className="rounded-2xl border border-dashed bg-slate-50 p-6 text-center text-sm text-slate-500">В проекте ещё нет этапов. Нажмите «Этап», чтобы создать первый блок работ.</div>}
+
+                        {directProjectTasks.length > 0 && (
+                          <div className="overflow-hidden rounded-2xl border border-dashed border-amber-200 bg-amber-50/40">
+                            <div className="flex flex-col gap-2 border-b border-amber-100 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                              <div>
+                                <h4 className="font-semibold text-amber-950">Задачи проекта без этапа</h4>
+                                <p className="text-xs text-amber-800">Эти задачи относятся напрямую к проекту и не пропадают, даже если этапы не созданы.</p>
+                              </div>
+                              <span className="rounded-lg bg-white px-2.5 py-1.5 text-xs text-amber-900">{directProjectTasks.length} показано / {allDirectProjectTasks.length} всего</span>
+                            </div>
+                            <div className="bg-white">
+                              <div className="hidden grid-cols-[minmax(260px,2fr)_130px_135px_150px_minmax(180px,1fr)_110px] gap-3 border-b bg-amber-50/60 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-amber-900 lg:grid">
+                                <span>Задача</span><span>Дедлайн</span><span>Ответственный</span><span>Статус</span><span>Комментарий</span><span>Действия</span>
+                              </div>
+                              {directProjectTasks.map((task) => (
+                                <div key={task.id} className="grid gap-3 border-b px-4 py-3 last:border-b-0 lg:grid-cols-[minmax(260px,2fr)_130px_135px_150px_minmax(180px,1fr)_110px] lg:items-center">
+                                  <div><div className="flex flex-wrap items-center gap-2"><b className="text-sm">{task.title}</b><span className={`rounded-full px-2 py-0.5 text-[11px] ${priorityStyle(task.priority)}`}>{task.priority}</span>{task.deadline < todayIso() && !isTaskCompleted(task) && <span className="rounded-full bg-rose-100 px-2 py-0.5 text-[11px] text-rose-700">Просрочено</span>}</div>{task.result && <p className="mt-1 text-xs text-slate-500">Результат: {task.result}</p>}</div>
+                                  <span className="text-sm">{formatDate(task.deadline)}</span>
+                                  <span className="text-sm font-medium">{task.owner}</span>
+                                  <select value={task.status} onChange={(event) => updateTaskStatus(task.id, event.target.value)} className={`rounded-xl border-0 px-2.5 py-2 text-sm ${statusStyle(task.status)}`}>{TASK_STATUSES.map((status) => <option key={status}>{status}</option>)}</select>
+                                  <div className="min-w-0 text-sm text-slate-600"><span className="block">{task.comment || '—'}</span><TaskResourceLink url={task.resource_url} compact /></div>
+                                  <span className="flex gap-1"><button type="button" onClick={() => openTaskModal(task)} className="rounded-lg bg-violet-50 p-2 text-violet-700 hover:bg-violet-100"><Edit3 className="h-4 w-4" /></button><button type="button" onClick={() => deleteTask(task)} className="rounded-lg bg-rose-50 p-2 text-rose-600 hover:bg-rose-100"><Trash2 className="h-4 w-4" /></button></span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {projectStages.length === 0 && directProjectTasks.length === 0 && <div className="rounded-2xl border border-dashed bg-slate-50 p-6 text-center text-sm text-slate-500">В проекте ещё нет этапов и задач. Добавьте задачу напрямую в проект или создайте первый этап.</div>}
                       </div>
                     )}
                   </div>
@@ -2530,6 +2621,17 @@ export default function App() {
               })}{filteredTasks.length === 0 && <div className="rounded-2xl border border-dashed p-8 text-center text-slate-500">По выбранным фильтрам задач нет.</div>}</div>
             </div>
           </Card>
+        )}
+
+        {activeTab === 'ai' && (
+          <AiAssistantPanel
+            sections={sections}
+            projects={projects}
+            stages={stages}
+            employees={employees}
+            currentUser={currentUser}
+            onCreateTasks={createAiTasks}
+          />
         )}
 
         {activeTab === 'templates' && (

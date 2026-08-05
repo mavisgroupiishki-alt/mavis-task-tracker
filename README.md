@@ -1,11 +1,22 @@
-# MAVIS Task Tracker 6.1
+# MAVIS Task Tracker 6.2
 
-Иерархия: **раздел → проект → этап → задача**.
+Проектный дашборд MAVIS GROUP с Supabase и Bitrix24 Вайбкод AI.
 
-Доступ:
+## Команды
 
-- Аня — администратор с паролем Supabase Auth;
-- остальные сотрудники — выбор имени без пароля;
-- административные изменения разделов и команды защищены на уровне Supabase.
+```bash
+npm install
+npm run build
+npm start
+```
 
-Перед деплоем выполните `supabase_v6_1_admin_and_employee_choice.sql`, затем следуйте файлу `ОБНОВЛЕНИЕ_6_1_ВХОД_ПО_ИМЕНИ.md`.
+## Переменные окружения
+
+```text
+VITE_SUPABASE_URL
+VITE_SUPABASE_ANON_KEY
+VIBECODE_API_KEY
+VIBECODE_MODEL=bitrix/bitrixgpt-5.5
+```
+
+`VIBECODE_API_KEY` — только серверный секрет. Никогда не добавляйте к нему префикс `VITE_`.

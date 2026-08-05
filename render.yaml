@@ -1,11 +1,21 @@
 services:
   - type: web
-    name: mavis-task-tracker
-    env: static
+    name: mavis-task-tracker-ai
+    runtime: node
+    plan: free
     buildCommand: npm install && npm run build
-    staticPublishPath: dist
+    startCommand: npm start
+    healthCheckPath: /api/ai/health
     envVars:
       - key: VITE_SUPABASE_URL
         sync: false
       - key: VITE_SUPABASE_ANON_KEY
         sync: false
+      - key: VIBECODE_API_KEY
+        sync: false
+      - key: VIBECODE_MODEL
+        value: bitrix/bitrixgpt-5.5
+      - key: AI_ALLOWED_ORIGIN
+        sync: false
+      - key: NODE_VERSION
+        value: 22.16.0

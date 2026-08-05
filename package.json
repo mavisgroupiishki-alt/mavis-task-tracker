@@ -1,12 +1,13 @@
 {
   "name": "mavis-task-tracker",
-  "version": "6.1.0",
+  "version": "6.2.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
-    "preview": "vite preview --host 0.0.0.0"
+    "preview": "vite preview --host 0.0.0.0",
+    "start": "node server.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "latest",
@@ -17,7 +18,9 @@
     "lucide-react": "latest",
     "framer-motion": "latest",
     "recharts": "latest",
-    "xlsx": "0.18.5"
+    "xlsx": "0.18.5",
+    "express": "4.21.2",
+    "multer": "1.4.5-lts.1"
   },
   "devDependencies": {
     "tailwindcss": "3.4.17",
