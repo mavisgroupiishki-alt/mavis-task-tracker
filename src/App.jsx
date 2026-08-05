@@ -66,6 +66,8 @@ const RESCHEDULES_STORAGE_KEY = 'mavis_task_tracker_reschedules_v1';
 const SECTIONS_STORAGE_KEY = 'mavis_task_tracker_sections_v1';
 const CALENDAR_BACKUPS_STORAGE_KEY = 'mavis_task_tracker_calendar_backups_v1';
 const TEMPLATES_STORAGE_KEY = 'mavis_task_tracker_project_templates_v1';
+const SELECTED_EMPLOYEE_STORAGE_KEY = 'mavis_selected_employee_v1';
+const ADMIN_EMAIL = 'anya@mavis.local';
 
 const DEFAULT_EMPLOYEES = [
   { id: 'default-sasha', name: 'Саша', role: 'Руководитель отдела продаж', color: '#7c3aed' },
@@ -833,8 +835,9 @@ export default function App() {
   const [authLoading, setAuthLoading] = useState(Boolean(supabase));
   const [session, setSession] = useState(null);
   const [currentUser, setCurrentUser] = useState(null);
-  const [loginForm, setLoginForm] = useState({ login: '', password: '' });
+  const [loginForm, setLoginForm] = useState({ password: '' });
   const [loginError, setLoginError] = useState('');
+  const [accessEmployees, setAccessEmployees] = useState([]);
 
   const [isTaskModalOpen, setIsTaskModalOpen] = useState(false);
   const [isProjectModalOpen, setIsProjectModalOpen] = useState(false);
@@ -854,7 +857,7 @@ export default function App() {
   const [projectForm, setProjectForm] = useState({ name: '', description: '', owner: 'Саша', customer: '', section_id: '', deadline: '', status: 'В работе', color: PROJECT_COLORS[0] });
   const [stageForm, setStageForm] = useState({ project_id: '', title: '', description: '', owner: 'Саша', deadline: '', sort_order: 1 });
   const [sectionForm, setSectionForm] = useState({ name: '', description: '', owner: 'Саша', color: SECTION_COLORS[0] });
-  const [employeeForm, setEmployeeForm] = useState({ name: '', role: '', login: '', password: '', task_capacity: 10, color: EMPLOYEE_COLORS[0], is_active: true });
+  const [employeeForm, setEmployeeForm] = useState({ name: '', role: '', task_capacity: 10, color: EMPLOYEE_COLORS[0], is_active: true });
   const [templateLaunchForm, setTemplateLaunchForm] = useState({ name: '', section_id: '', owner: 'Саша', customer: '', start_date: todayIso() });
   const [bulkForm, setBulkForm] = useState({ owner: '', status: '', priority: '', deadline: '' });
   const [deadlineChange, setDeadlineChange] = useState({ changed_by: 'Саша', reason: '' });
@@ -866,40 +869,86 @@ export default function App() {
   const nextWeekStart = addDays(currentWeekStart, 7);
   const nextWeekEnd = addDays(currentWeekStart, 13);
 
-  async function signIn(event) {
+  function buildEmployeeSession(employee, accessMode = 'employee', authUserId = null) {
+    return {
+      auth_user_id: authUserId,
+      employee_id: employee.id,
+      employee_name: employee.name,
+      employee_role: employee.role,
+      employee_color: employee.color,
+      task_capacity: employee.task_capacity || 10,
+      is_admin: accessMode === 'admin',
+      is_active: employee.is_active !== false,
+      access_mode: accessMode,
+    };
+  }
+
+  async function loadAccessEmployees() {
+    if (!supabase) {
+      const local = parseLocal(EMPLOYEES_STORAGE_KEY, DEFAULT_EMPLOYEES).map(normalizeEmployee).filter((item) => item.is_active !== false);
+      setAccessEmployees(local);
+      return local;
+    }
+    const { data, error } = await supabase.rpc('list_app_employees');
+    if (error) throw error;
+    const directory = (data || []).map(normalizeEmployee);
+    setAccessEmployees(directory);
+    return directory;
+  }
+
+  async function signInAdmin(event) {
     event?.preventDefault?.();
     if (!supabase) return;
-    const login = String(loginForm.login || '').trim();
     const password = String(loginForm.password || '');
-    if (!login || !password) {
-      setLoginError('Введите имя пользователя и пароль.');
+    if (!password) {
+      setLoginError('Введите пароль администратора.');
       return;
     }
     setAuthLoading(true);
     setLoginError('');
     try {
-      const { data: internalEmail, error: resolveError } = await supabase.rpc('resolve_login_email', { p_login: login });
-      if (resolveError) throw resolveError;
-      if (!internalEmail) throw new Error('Пользователь с таким логином не найден или отключён.');
-      const { error } = await supabase.auth.signInWithPassword({ email: internalEmail, password });
+      const { error } = await supabase.auth.signInWithPassword({ email: ADMIN_EMAIL, password });
       if (error) throw error;
-      setLoginForm({ login: '', password: '' });
+      setLoginForm({ password: '' });
     } catch (error) {
-      setLoginError(error.message === 'Invalid login credentials' ? 'Неверный логин или пароль.' : error.message);
+      setLoginError(error.message === 'Invalid login credentials' ? 'Неверный пароль Ани.' : error.message);
       setAuthLoading(false);
     }
   }
 
+  function enterAsEmployee(employeeId) {
+    const employee = accessEmployees.find((item) => String(item.id) === String(employeeId));
+    if (!employee || employee.is_active === false) {
+      setLoginError('Сотрудник не найден или доступ отключён.');
+      return;
+    }
+    if (String(employee.name).trim().toLowerCase() === 'аня') {
+      setLoginError('Аня входит через пароль администратора.');
+      return;
+    }
+    localStorage.setItem(SELECTED_EMPLOYEE_STORAGE_KEY, String(employee.id));
+    setCurrentUser(buildEmployeeSession(employee, 'employee'));
+    setSelectedEmployee(employee.name);
+    setLoginError('');
+  }
+
   async function signOut() {
-    if (supabase) await supabase.auth.signOut();
+    const wasAdmin = currentUser?.is_admin;
+    localStorage.removeItem(SELECTED_EMPLOYEE_STORAGE_KEY);
+    if (supabase && wasAdmin) await supabase.auth.signOut();
     setCurrentUser(null);
-    setSession(null);
+    if (wasAdmin) setSession(null);
     setTasks([]);
     setProjects([]);
     setStages([]);
     setSections([]);
     setEmployees([]);
     setMessage('');
+    try {
+      await loadAccessEmployees();
+    } catch (error) {
+      setLoginError(`Не удалось загрузить список сотрудников. ${error.message}`);
+    }
   }
 
   async function loadData() {
@@ -935,7 +984,7 @@ export default function App() {
 
     try {
       const [employeesResult, projectsResult, stagesResult, sectionsResult, tasksResult, reschedulesResult, templatesResult] = await Promise.all([
-        supabase.from('employees').select('*').order('created_at', { ascending: true }),
+        supabase.rpc('list_app_employees'),
         supabase.from('projects').select('*').order('created_at', { ascending: false }),
         supabase.from('project_stages').select('*').order('sort_order', { ascending: true }),
         supabase.from('task_sections').select('*').order('created_at', { ascending: true }),
@@ -993,60 +1042,84 @@ export default function App() {
   }
 
   useEffect(() => {
-    if (!supabase) {
-      setAuthLoading(false);
-      loadData();
-      return undefined;
+    let active = true;
+    let subscription;
+
+    async function initializeAccess() {
+      setAuthLoading(true);
+      setLoginError('');
+      try {
+        const directory = await loadAccessEmployees();
+        if (!active) return;
+
+        if (!supabase) {
+          const rememberedId = localStorage.getItem(SELECTED_EMPLOYEE_STORAGE_KEY);
+          const remembered = directory.find((item) => String(item.id) === String(rememberedId));
+          if (remembered) setCurrentUser(buildEmployeeSession(remembered, 'employee'));
+          setAuthLoading(false);
+          return;
+        }
+
+        const { data } = await supabase.auth.getSession();
+        const restoredSession = data.session || null;
+        setSession(restoredSession);
+
+        if (restoredSession?.user?.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase()) {
+          const anya = directory.find((item) => String(item.name).trim().toLowerCase() === 'аня');
+          if (!anya) throw new Error('В таблице сотрудников не найдена Аня. Выполните SQL версии 6.1.');
+          setCurrentUser(buildEmployeeSession(anya, 'admin', restoredSession.user.id));
+          setSelectedEmployee(anya.name);
+        } else {
+          if (restoredSession) await supabase.auth.signOut();
+          const rememberedId = localStorage.getItem(SELECTED_EMPLOYEE_STORAGE_KEY);
+          const remembered = directory.find((item) => String(item.id) === String(rememberedId) && String(item.name).trim().toLowerCase() !== 'аня');
+          if (remembered) {
+            setCurrentUser(buildEmployeeSession(remembered, 'employee'));
+            setSelectedEmployee(remembered.name);
+          }
+        }
+      } catch (error) {
+        if (active) setLoginError(`Не удалось открыть общую базу. ${error.message}`);
+      } finally {
+        if (active) setAuthLoading(false);
+      }
     }
 
-    let active = true;
-    async function restoreSession() {
-      const { data } = await supabase.auth.getSession();
-      if (!active) return;
-      setSession(data.session || null);
-      if (!data.session) setAuthLoading(false);
+    initializeAccess();
+
+    if (supabase) {
+      const { data } = supabase.auth.onAuthStateChange(async (_event, nextSession) => {
+        if (!active) return;
+        setSession(nextSession || null);
+        if (nextSession?.user?.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase()) {
+          try {
+            const directory = await loadAccessEmployees();
+            const anya = directory.find((item) => String(item.name).trim().toLowerCase() === 'аня');
+            if (!anya) throw new Error('Сотрудник Аня не найден.');
+            setCurrentUser(buildEmployeeSession(anya, 'admin', nextSession.user.id));
+            setSelectedEmployee(anya.name);
+            setAuthLoading(false);
+          } catch (error) {
+            setLoginError(error.message);
+            setAuthLoading(false);
+          }
+        } else if (!nextSession) {
+          setCurrentUser((previous) => previous?.access_mode === 'admin' ? null : previous);
+          setAuthLoading(false);
+        }
+      });
+      subscription = data.subscription;
     }
-    restoreSession();
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
-      setSession(nextSession || null);
-      if (!nextSession) {
-        setCurrentUser(null);
-        setDataLoaded(false);
-        setAuthLoading(false);
-      }
-    });
+
     return () => {
       active = false;
-      listener.subscription.unsubscribe();
+      subscription?.unsubscribe();
     };
   }, []);
 
   useEffect(() => {
-    if (!supabase || !session) return;
-    let active = true;
-    async function loadCurrentUser() {
-      setAuthLoading(true);
-      const { data, error } = await supabase.rpc('current_app_user');
-      if (!active) return;
-      const profile = Array.isArray(data) ? data[0] : data;
-      if (error || !profile) {
-        setCurrentUser(null);
-        setLoginError(error?.message || 'Для этого аккаунта не создан профиль сотрудника.');
-        await supabase.auth.signOut();
-        setAuthLoading(false);
-        return;
-      }
-      setCurrentUser(profile);
-      setSelectedEmployee(profile.employee_name || 'Все');
-      setAuthLoading(false);
-    }
-    loadCurrentUser();
-    return () => { active = false; };
-  }, [session?.user?.id]);
-
-  useEffect(() => {
-    if (!supabase || currentUser) loadData();
-  }, [currentUser?.auth_user_id]);
+    if (currentUser) loadData();
+  }, [currentUser?.employee_id, currentUser?.is_admin]);
 
   useEffect(() => { if (dataLoaded) localStorage.setItem(TASKS_STORAGE_KEY, JSON.stringify(tasks)); }, [tasks, dataLoaded]);
   useEffect(() => { if (dataLoaded) localStorage.setItem(EMPLOYEES_STORAGE_KEY, JSON.stringify(employees)); }, [employees, dataLoaded]);
@@ -1284,7 +1357,7 @@ export default function App() {
         stage_id: task.stage_id || '',
         section_id: task.section_id || '',
       });
-      setDeadlineChange({ changed_by: task.owner || employeeNames[0] || 'Саша', reason: '' });
+      setDeadlineChange({ changed_by: currentUser?.employee_name || task.owner || employeeNames[0] || 'Саша', reason: '' });
     } else {
       const project = projectById.get(String(projectId));
       const stage = stageById.get(String(stageId));
@@ -1294,7 +1367,7 @@ export default function App() {
         ...emptyTaskForm(selectedDate, stage?.owner || project?.owner || section?.owner || (selectedEmployee !== 'Все' ? selectedEmployee : employeeNames[0]), projectId, stageId),
         section_id: sectionId || '',
       });
-      setDeadlineChange({ changed_by: selectedEmployee !== 'Все' ? selectedEmployee : employeeNames[0] || 'Саша', reason: '' });
+      setDeadlineChange({ changed_by: currentUser?.employee_name || (selectedEmployee !== 'Все' ? selectedEmployee : employeeNames[0]) || 'Саша', reason: '' });
     }
     setIsTaskModalOpen(true);
   }
@@ -1556,7 +1629,7 @@ export default function App() {
 
       if (currentTask.deadline !== updatedTask.deadline) {
         await createRescheduleRecord(currentTask, updatedTask, {
-          changed_by: selectedEmployee !== 'Все' ? selectedEmployee : updatedTask.owner,
+          changed_by: currentUser?.employee_name || (selectedEmployee !== 'Все' ? selectedEmployee : updatedTask.owner),
           reason: 'Перенос выполнен перетаскиванием в календаре',
         });
       }
@@ -1744,14 +1817,16 @@ export default function App() {
 
   async function deleteEmployee(employee) {
     if (!isAdmin) return setMessage('Отключать сотрудников может только Аня.');
+    if (String(employee.name).trim().toLowerCase() === 'аня') return setMessage('Нельзя отключить администратора Аню.');
     try {
-      const { data, error } = await supabase.functions.invoke('admin-manage-user', {
-        body: { action: 'deactivate', employee_id: employee.id },
+      const { error } = await supabase.rpc('admin_set_employee_active', {
+        p_employee_id: employee.id,
+        p_is_active: false,
       });
       if (error) throw error;
-      if (data?.error) throw new Error(data.error);
       await loadData();
-      setMessage(`Доступ сотрудника ${employee.name} отключён. Его задачи и история сохранены.`);
+      await loadAccessEmployees();
+      setMessage(`Сотрудник ${employee.name} отключён. Его задачи и история сохранены.`);
     } catch (error) {
       setMessage(`Не удалось отключить сотрудника: ${error.message}`);
     }
@@ -1764,10 +1839,10 @@ export default function App() {
     }
     if (employee) {
       setEditingEmployeeId(employee.id);
-      setEmployeeForm({ name: employee.name, role: employee.role, login: employee.login || employee.name, password: '', task_capacity: employee.task_capacity || 10, color: employee.color, is_active: employee.is_active !== false });
+      setEmployeeForm({ name: employee.name, role: employee.role, task_capacity: employee.task_capacity || 10, color: employee.color, is_active: employee.is_active !== false });
     } else {
       setEditingEmployeeId(null);
-      setEmployeeForm({ name: '', role: '', login: '', password: '', task_capacity: 10, color: EMPLOYEE_COLORS[employees.length % EMPLOYEE_COLORS.length], is_active: true });
+      setEmployeeForm({ name: '', role: '', task_capacity: 10, color: EMPLOYEE_COLORS[employees.length % EMPLOYEE_COLORS.length], is_active: true });
     }
     setIsEmployeeModalOpen(true);
   }
@@ -1775,36 +1850,26 @@ export default function App() {
   async function saveEmployee() {
     if (!isAdmin) return setMessage('Добавлять и редактировать сотрудников может только Аня.');
     const name = String(employeeForm.name || '').trim();
-    const login = String(employeeForm.login || name).trim();
-    const password = String(employeeForm.password || '');
     if (!name) return setMessage('Укажите имя сотрудника.');
-    if (!login) return setMessage('Укажите логин сотрудника.');
-    if (!editingEmployeeId && password.length < 8) return setMessage('Для нового сотрудника задайте пароль минимум из 8 символов.');
     const duplicate = employees.some((item) => String(item.id) !== String(editingEmployeeId) && item.name.toLowerCase() === name.toLowerCase());
     if (duplicate) return setMessage('Сотрудник с таким именем уже существует.');
 
-    if (!supabase) return setMessage('Регистрация сотрудников доступна только при подключённом Supabase.');
+    if (!supabase) return setMessage('Редактирование команды доступно только при подключённом Supabase.');
     try {
-      const action = editingEmployeeId ? 'update' : 'create';
-      const { data, error } = await supabase.functions.invoke('admin-manage-user', {
-        body: {
-          action,
-          employee_id: editingEmployeeId || null,
-          name,
-          role: employeeForm.role.trim() || 'Сотрудник',
-          login,
-          password: password || undefined,
-          task_capacity: Math.max(1, Number(employeeForm.task_capacity || 10)),
-          color: employeeForm.color,
-          is_active: employeeForm.is_active !== false,
-        },
+      const { error } = await supabase.rpc('admin_save_employee', {
+        p_employee_id: editingEmployeeId || null,
+        p_name: name,
+        p_role: employeeForm.role.trim() || 'Сотрудник',
+        p_color: employeeForm.color,
+        p_task_capacity: Math.max(1, Number(employeeForm.task_capacity || 10)),
+        p_is_active: employeeForm.is_active !== false,
       });
       if (error) throw error;
-      if (data?.error) throw new Error(data.error);
       await loadData();
+      await loadAccessEmployees();
       setIsEmployeeModalOpen(false);
       setEditingEmployeeId(null);
-      setMessage(editingEmployeeId ? `Сотрудник ${name} обновлён.` : `Сотрудник ${name} зарегистрирован. Логин: ${login}.`);
+      setMessage(editingEmployeeId ? `Сотрудник ${name} обновлён.` : `Сотрудник ${name} добавлен в список входа.`);
     } catch (error) {
       setMessage(`Не удалось сохранить сотрудника. ${error.message}`);
     }
@@ -1923,7 +1988,7 @@ export default function App() {
       if (payload.deadline) {
         const movedTasks = previous.filter((task) => selectedTaskIds.includes(String(task.id)) && task.deadline !== payload.deadline);
         for (const oldTask of movedTasks) {
-          await createRescheduleRecord(oldTask, { ...oldTask, ...payload }, { changed_by: selectedEmployee !== 'Все' ? selectedEmployee : oldTask.owner, reason: 'Массовое изменение дедлайна' });
+          await createRescheduleRecord(oldTask, { ...oldTask, ...payload }, { changed_by: currentUser?.employee_name || (selectedEmployee !== 'Все' ? selectedEmployee : oldTask.owner), reason: 'Массовое изменение дедлайна' });
         }
       }
       const changedCount = selectedTaskIds.length;
@@ -2084,14 +2149,33 @@ export default function App() {
     return <div className="flex min-h-screen items-center justify-center bg-slate-950 text-white"><div className="text-center"><RefreshCw className="mx-auto h-8 w-8 animate-spin text-violet-300" /><p className="mt-3 text-sm text-slate-300">Проверяем учётную запись…</p></div></div>;
   }
 
-  if (supabase && !currentUser) {
+  if (!currentUser) {
+    const selectableEmployees = accessEmployees.filter((employee) => employee.is_active !== false && String(employee.name).trim().toLowerCase() !== 'аня');
     return (
-      <div className="flex min-h-screen items-center justify-center bg-[radial-gradient(circle_at_top_left,_rgba(124,58,237,0.35),_transparent_35%),radial-gradient(circle_at_bottom_right,_rgba(14,165,233,0.25),_transparent_35%),#0f172a] p-4">
-        <form onSubmit={signIn} className="w-full max-w-md rounded-[2rem] bg-white p-7 shadow-2xl">
-          <div className="mb-6 flex items-center gap-3"><span className="rounded-2xl bg-violet-100 p-3 text-violet-700"><ShieldCheck className="h-6 w-6" /></span><div><h1 className="text-2xl font-bold">MAVIS Task Tracker</h1><p className="text-sm text-slate-500">Вход сотрудника</p></div></div>
-          <div className="space-y-4"><Field label="Логин"><div className="relative"><UserRound className="absolute left-3 top-3 h-4 w-4 text-slate-400" /><input autoFocus value={loginForm.login} onChange={(event) => setLoginForm({ ...loginForm, login: event.target.value })} placeholder="Например: Аня" className="w-full rounded-2xl border px-3 py-3 pl-10" /></div></Field><Field label="Пароль"><div className="relative"><KeyRound className="absolute left-3 top-3 h-4 w-4 text-slate-400" /><input type="password" value={loginForm.password} onChange={(event) => setLoginForm({ ...loginForm, password: event.target.value })} className="w-full rounded-2xl border px-3 py-3 pl-10" /></div></Field>{loginError && <div className="rounded-xl bg-rose-50 p-3 text-sm text-rose-700">{loginError}</div>}<button type="submit" className="inline-flex w-full items-center justify-center rounded-2xl bg-violet-600 px-4 py-3 font-medium text-white hover:bg-violet-500"><LogIn className="mr-2 h-5 w-5" />Войти</button></div>
-          <p className="mt-5 text-center text-xs leading-5 text-slate-400">Учётную запись создаёт Аня во вкладке «Команда». После входа приложение понимает сотрудника по его профилю в Supabase.</p>
-        </form>
+      <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(124,58,237,0.35),_transparent_35%),radial-gradient(circle_at_bottom_right,_rgba(14,165,233,0.25),_transparent_35%),#0f172a] p-4 md:p-8">
+        <div className="mx-auto grid min-h-[calc(100vh-4rem)] max-w-5xl items-center gap-5 lg:grid-cols-[1.15fr_0.85fr]">
+          <section className="rounded-[2rem] bg-white p-6 shadow-2xl md:p-8">
+            <div className="mb-6 flex items-center gap-3"><span className="rounded-2xl bg-sky-100 p-3 text-sky-700"><Users className="h-6 w-6" /></span><div><h1 className="text-2xl font-bold">Выберите себя</h1><p className="text-sm text-slate-500">Сотрудникам пароль не нужен</p></div></div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              {selectableEmployees.map((employee) => (
+                <button key={employee.id} type="button" onClick={() => enterAsEmployee(employee.id)} className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-left transition hover:-translate-y-0.5 hover:border-sky-300 hover:bg-sky-50 hover:shadow-md">
+                  <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl text-sm font-bold" style={{ backgroundColor: employee.color, color: contrastTextColor(employee.color) }}>{employeeInitials(employee.name)}</span>
+                  <span><b className="block">{employee.name}</b><span className="text-sm text-slate-500">{employee.role}</span></span>
+                </button>
+              ))}
+            </div>
+            {!selectableEmployees.length && <div className="rounded-2xl border border-dashed p-5 text-center text-sm text-slate-500">Список сотрудников пока пуст. Сначала выполните SQL версии 6.1.</div>}
+            <p className="mt-5 text-xs leading-5 text-slate-400">Выбранное имя запоминается только на этом устройстве. Для смены сотрудника нажмите «Выйти».</p>
+          </section>
+
+          <form onSubmit={signInAdmin} className="rounded-[2rem] bg-slate-950 p-6 text-white shadow-2xl md:p-8">
+            <div className="mb-6 flex items-center gap-3"><span className="rounded-2xl bg-violet-500/20 p-3 text-violet-200 ring-1 ring-violet-300/20"><ShieldCheck className="h-6 w-6" /></span><div><h2 className="text-2xl font-bold">Вход Ани</h2><p className="text-sm text-slate-400">Администратор приложения</p></div></div>
+            <label><span className="mb-1 block text-sm font-medium text-slate-200">Пароль администратора</span><div className="relative"><KeyRound className="absolute left-3 top-3 h-4 w-4 text-slate-400" /><input autoFocus type="password" value={loginForm.password} onChange={(event) => setLoginForm({ password: event.target.value })} className="w-full rounded-2xl border border-white/10 bg-white/10 px-3 py-3 pl-10 text-white outline-none placeholder:text-slate-500 focus:border-violet-300" /></div></label>
+            {loginError && <div className="mt-4 rounded-xl bg-rose-500/15 p-3 text-sm text-rose-200 ring-1 ring-rose-400/20">{loginError}</div>}
+            <button type="submit" className="mt-4 inline-flex w-full items-center justify-center rounded-2xl bg-violet-500 px-4 py-3 font-medium text-white hover:bg-violet-400"><LogIn className="mr-2 h-5 w-5" />Войти как Аня</button>
+            <p className="mt-5 text-xs leading-5 text-slate-400">Только Аня может создавать и редактировать разделы, добавлять сотрудников и менять настройки команды.</p>
+          </form>
+        </div>
       </div>
     );
   }
@@ -2103,7 +2187,7 @@ export default function App() {
           <div className="flex flex-col gap-6 xl:flex-row xl:items-center xl:justify-between">
             <div className="max-w-3xl">
               <div className="mb-3 inline-flex items-center rounded-full bg-white/10 px-3 py-1 text-xs font-medium text-violet-100 ring-1 ring-white/10">
-                <Sparkles className="mr-2 h-3.5 w-3.5" /> MAVIS GROUP · центр проектов · версия 6.0
+                <Sparkles className="mr-2 h-3.5 w-3.5" /> MAVIS GROUP · центр проектов · версия 6.1
               </div>
               <h1 className="text-3xl font-bold tracking-tight md:text-4xl">Разделы → проекты → этапы → задачи</h1>
               <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-300 md:text-base">Собирайте проекты по направлениям, управляйте стадиями и показывайте только нужные статусы задач без потери общей истории.</p>
@@ -2491,7 +2575,7 @@ export default function App() {
 
         {activeTab === 'team' && (
           <div className="grid gap-5 xl:grid-cols-[1.1fr_1fr]">
-            <Card><div className="p-5"><div className="mb-5 flex items-center justify-between"><div><h2 className="text-xl font-semibold">Команда</h2><p className="text-sm text-slate-500">Карточка подсвечивается, когда активных задач больше установленной нормы.</p></div>{isAdmin && <button type="button" onClick={() => openEmployeeModal()} className="inline-flex items-center rounded-xl bg-sky-600 px-4 py-2 text-sm font-medium text-white"><UserPlus className="mr-2 h-4 w-4" />Добавить</button>}</div><div className="grid gap-3 sm:grid-cols-2">{employees.map((employee) => { const allPersonTasks = tasks.filter((task) => task.owner === employee.name); const activePersonTasks = allPersonTasks.filter((task) => !isTaskCompleted(task)); const overduePersonTasks = activePersonTasks.filter((task) => task.deadline < todayIso()); const capacity = Math.max(1, Number(employee.task_capacity || 10)); const overload = Math.max(0, activePersonTasks.length - capacity); const critical = activePersonTasks.length > capacity * 1.25; return <div key={employee.id} className={`rounded-2xl border p-4 transition ${overload ? (critical ? 'border-rose-400 bg-rose-50 shadow-[0_0_0_3px_rgba(244,63,94,0.08)]' : 'border-amber-300 bg-amber-50') : 'border-slate-200 bg-white'}`}><div className="flex items-start justify-between gap-3"><div className="flex items-center gap-3"><span className="flex h-11 w-11 items-center justify-center rounded-2xl text-sm font-bold" style={{ backgroundColor: employee.color, color: contrastTextColor(employee.color) }}>{employeeInitials(employee.name)}</span><div><div className="flex flex-wrap items-center gap-2"><b>{employee.name}</b>{overload > 0 && <span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${critical ? 'bg-rose-600 text-white' : 'bg-amber-200 text-amber-900'}`}>Перегруз +{overload}</span>}{employee.is_active === false && <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[11px]">доступ отключён</span>}</div><p className="text-sm text-slate-500">{employee.role}</p><p className="mt-1 text-xs text-slate-400">Норма: {capacity} активных · логин: {employee.login || 'не создан'}</p></div></div>{isAdmin && <div className="flex gap-1"><button type="button" onClick={() => openEmployeeModal(employee)} className="rounded-lg p-2 text-violet-600 hover:bg-violet-50" title="Редактировать сотрудника и доступ"><Edit3 className="h-4 w-4" /></button><button type="button" onClick={() => deleteEmployee(employee)} className="rounded-lg p-2 text-rose-500 hover:bg-rose-50" title="Отключить доступ"><Trash2 className="h-4 w-4" /></button></div>}</div><div className="mt-4 grid grid-cols-3 gap-2 text-center text-xs"><span className="rounded-lg bg-violet-50 px-2 py-2 text-violet-800"><b className="block text-lg">{activePersonTasks.length}</b>активных</span><span className="rounded-lg bg-rose-100 px-2 py-2 text-rose-700"><b className="block text-lg">{overduePersonTasks.length}</b>просрочено</span><span className="rounded-lg bg-slate-100 px-2 py-2 text-slate-700"><b className="block text-lg">{capacity}</b>норма</span></div></div>; })}</div></div></Card>
+            <Card><div className="p-5"><div className="mb-5 flex items-center justify-between"><div><h2 className="text-xl font-semibold">Команда</h2><p className="text-sm text-slate-500">Карточка подсвечивается, когда активных задач больше установленной нормы.</p></div>{isAdmin && <button type="button" onClick={() => openEmployeeModal()} className="inline-flex items-center rounded-xl bg-sky-600 px-4 py-2 text-sm font-medium text-white"><UserPlus className="mr-2 h-4 w-4" />Добавить</button>}</div><div className="grid gap-3 sm:grid-cols-2">{employees.map((employee) => { const allPersonTasks = tasks.filter((task) => task.owner === employee.name); const activePersonTasks = allPersonTasks.filter((task) => !isTaskCompleted(task)); const overduePersonTasks = activePersonTasks.filter((task) => task.deadline < todayIso()); const capacity = Math.max(1, Number(employee.task_capacity || 10)); const overload = Math.max(0, activePersonTasks.length - capacity); const critical = activePersonTasks.length > capacity * 1.25; return <div key={employee.id} className={`rounded-2xl border p-4 transition ${overload ? (critical ? 'border-rose-400 bg-rose-50 shadow-[0_0_0_3px_rgba(244,63,94,0.08)]' : 'border-amber-300 bg-amber-50') : 'border-slate-200 bg-white'}`}><div className="flex items-start justify-between gap-3"><div className="flex items-center gap-3"><span className="flex h-11 w-11 items-center justify-center rounded-2xl text-sm font-bold" style={{ backgroundColor: employee.color, color: contrastTextColor(employee.color) }}>{employeeInitials(employee.name)}</span><div><div className="flex flex-wrap items-center gap-2"><b>{employee.name}</b>{overload > 0 && <span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${critical ? 'bg-rose-600 text-white' : 'bg-amber-200 text-amber-900'}`}>Перегруз +{overload}</span>}{employee.is_active === false && <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[11px]">доступ отключён</span>}</div><p className="text-sm text-slate-500">{employee.role}</p><p className="mt-1 text-xs text-slate-400">Норма: {capacity} активных · вход по выбору имени</p></div></div>{isAdmin && <div className="flex gap-1"><button type="button" onClick={() => openEmployeeModal(employee)} className="rounded-lg p-2 text-violet-600 hover:bg-violet-50" title="Редактировать сотрудника и доступ"><Edit3 className="h-4 w-4" /></button><button type="button" onClick={() => deleteEmployee(employee)} className="rounded-lg p-2 text-rose-500 hover:bg-rose-50" title="Отключить доступ"><Trash2 className="h-4 w-4" /></button></div>}</div><div className="mt-4 grid grid-cols-3 gap-2 text-center text-xs"><span className="rounded-lg bg-violet-50 px-2 py-2 text-violet-800"><b className="block text-lg">{activePersonTasks.length}</b>активных</span><span className="rounded-lg bg-rose-100 px-2 py-2 text-rose-700"><b className="block text-lg">{overduePersonTasks.length}</b>просрочено</span><span className="rounded-lg bg-slate-100 px-2 py-2 text-slate-700"><b className="block text-lg">{capacity}</b>норма</span></div></div>; })}</div></div></Card>
             <Card><div className="p-5"><h2 className="flex items-center text-xl font-semibold"><Gauge className="mr-2 h-5 w-5" />Активные задачи против нормы</h2><p className="mb-4 text-sm text-slate-500">Красный — критический перегруз, жёлтый — превышение нормы. Серый столбец показывает индивидуальную норму сотрудника.</p><div className="h-[360px]"><ResponsiveContainer width="100%" height="100%"><BarChart data={workload} layout="vertical" margin={{ left: 15, right: 25 }}><XAxis type="number" allowDecimals={false} /><YAxis dataKey="name" type="category" width={90} /><Tooltip formatter={(value, name, props) => [value, name === 'tasks' ? `Активные · ${props.payload.overdue} просрочено` : 'Норма']} /><Legend /><Bar dataKey="capacity" name="Норма" fill="#cbd5e1" radius={[0, 8, 8, 0]} /><Bar dataKey="tasks" name="Активные" radius={[0, 10, 10, 0]}>{workload.map((entry) => <Cell key={entry.name} fill={entry.color} />)}</Bar></BarChart></ResponsiveContainer></div></div></Card>
             <Card className="xl:col-span-2"><div className="p-5"><h2 className="flex items-center text-xl font-semibold"><BarChart3 className="mr-2 h-5 w-5" />Структура активных задач по статусам</h2><p className="mb-3 text-sm text-slate-500">Круговая диаграмма показывает, где сейчас сосредоточена работа команды и сколько задач находится в блокерах.</p><div className="h-[340px]">{taskStatusChart.length ? <ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={taskStatusChart} dataKey="value" nameKey="name" cx="50%" cy="48%" innerRadius={72} outerRadius={118} paddingAngle={3} label={({ name, value }) => `${name}: ${value}`}>{taskStatusChart.map((entry) => <Cell key={entry.name} fill={entry.color} />)}</Pie><Tooltip formatter={(value) => [`${value} задач`, 'Количество']} /><Legend verticalAlign="bottom" height={36} /></PieChart></ResponsiveContainer> : <div className="flex h-full items-center justify-center text-slate-500">Активных задач пока нет.</div>}</div></div></Card>
           </div>
@@ -2565,7 +2649,7 @@ export default function App() {
             {deadlineWasChanged && (
               <div className="md:col-span-2 rounded-2xl border border-rose-200 bg-gradient-to-r from-rose-50 to-orange-50 p-4">
                 <div className="flex items-start gap-3"><span className="rounded-xl bg-rose-100 p-2 text-rose-600"><CalendarClock className="h-5 w-5" /></span><div><b>Изменён дедлайн: {formatDate(editingTask.deadline)} → {formatDate(taskForm.deadline)}</b><p className="mt-1 text-sm text-slate-600">После сохранения перенос появится в отдельном журнале.</p></div></div>
-                <div className="mt-4 grid gap-4 md:grid-cols-2"><Field label="Кто перенёс"><select value={deadlineChange.changed_by} onChange={(event) => setDeadlineChange({ ...deadlineChange, changed_by: event.target.value })} className="w-full rounded-2xl border bg-white px-3 py-2.5">{employeeNames.map((name) => <option key={name}>{name}</option>)}</select></Field><Field label="Причина переноса"><input value={deadlineChange.reason} onChange={(event) => setDeadlineChange({ ...deadlineChange, reason: event.target.value })} placeholder="Например: ждём данные от клиента" className="w-full rounded-2xl border px-3 py-2.5" /></Field></div>
+                <div className="mt-4 grid gap-4 md:grid-cols-2"><Field label="Кто перенёс">{isAdmin ? <select value={deadlineChange.changed_by} onChange={(event) => setDeadlineChange({ ...deadlineChange, changed_by: event.target.value })} className="w-full rounded-2xl border bg-white px-3 py-2.5">{employeeNames.map((name) => <option key={name}>{name}</option>)}</select> : <div className="rounded-2xl border bg-slate-50 px-3 py-2.5 font-medium">{currentUser?.employee_name}</div>}</Field><Field label="Причина переноса"><input value={deadlineChange.reason} onChange={(event) => setDeadlineChange({ ...deadlineChange, reason: event.target.value })} placeholder="Например: ждём данные от клиента" className="w-full rounded-2xl border px-3 py-2.5" /></Field></div>
               </div>
             )}
           </div>
@@ -2584,12 +2668,12 @@ export default function App() {
 
 
       {isEmployeeModalOpen && (
-        <Modal title={editingEmployeeId ? 'Редактирование сотрудника' : 'Добавить сотрудника'} subtitle="Аня создаёт сотруднику учётную запись: логин, пароль, должность, цвет и норму активных задач." onClose={() => setIsEmployeeModalOpen(false)} maxWidth="max-w-lg">
+        <Modal title={editingEmployeeId ? 'Редактирование сотрудника' : 'Добавить сотрудника'} subtitle="Сотрудник появится на экране входа и сможет выбрать своё имя без пароля. Пароль есть только у Ани." onClose={() => setIsEmployeeModalOpen(false)} maxWidth="max-w-lg">
           <div className="space-y-4">
             <Field label="Имя сотрудника"><div className="relative"><UserRound className="absolute left-3 top-3 h-4 w-4 text-slate-400" /><input value={employeeForm.name} onChange={(event) => setEmployeeForm({ ...employeeForm, name: event.target.value })} placeholder="Например: Мария" className="w-full rounded-2xl border px-3 py-2.5 pl-10" /></div></Field>
             <Field label="Должность или роль"><div className="relative"><Briefcase className="absolute left-3 top-3 h-4 w-4 text-slate-400" /><input value={employeeForm.role} onChange={(event) => setEmployeeForm({ ...employeeForm, role: event.target.value })} placeholder="Например: Менеджер проекта" className="w-full rounded-2xl border px-3 py-2.5 pl-10" /></div></Field>
-            <div className="grid gap-4 sm:grid-cols-2"><Field label="Логин"><div className="relative"><LogIn className="absolute left-3 top-3 h-4 w-4 text-slate-400" /><input value={employeeForm.login} onChange={(event) => setEmployeeForm({ ...employeeForm, login: event.target.value })} placeholder="Обычно имя сотрудника" className="w-full rounded-2xl border px-3 py-2.5 pl-10" /></div></Field><Field label={editingEmployeeId ? 'Новый пароль — необязательно' : 'Пароль'}><div className="relative"><KeyRound className="absolute left-3 top-3 h-4 w-4 text-slate-400" /><input type="password" value={employeeForm.password} onChange={(event) => setEmployeeForm({ ...employeeForm, password: event.target.value })} placeholder="Минимум 8 символов" className="w-full rounded-2xl border px-3 py-2.5 pl-10" /></div></Field></div>
-            <div className="grid gap-4 sm:grid-cols-2"><Field label="Норма активных задач"><div className="relative"><Gauge className="absolute left-3 top-3 h-4 w-4 text-slate-400" /><input type="number" min="1" value={employeeForm.task_capacity} onChange={(event) => setEmployeeForm({ ...employeeForm, task_capacity: event.target.value })} className="w-full rounded-2xl border px-3 py-2.5 pl-10" /></div></Field><Field label="Доступ"><select value={employeeForm.is_active ? 'active' : 'inactive'} onChange={(event) => setEmployeeForm({ ...employeeForm, is_active: event.target.value === 'active' })} className="w-full rounded-2xl border bg-white px-3 py-2.5"><option value="active">Активен</option><option value="inactive">Отключён</option></select></Field></div>
+            <div className="rounded-2xl border border-sky-100 bg-sky-50 p-4 text-sm text-sky-800"><b>Вход без пароля</b><p className="mt-1">После сохранения сотрудник увидит своё имя на стартовом экране приложения.</p></div>
+            <div className="grid gap-4 sm:grid-cols-2"><Field label="Норма активных задач"><div className="relative"><Gauge className="absolute left-3 top-3 h-4 w-4 text-slate-400" /><input type="number" min="1" value={employeeForm.task_capacity} onChange={(event) => setEmployeeForm({ ...employeeForm, task_capacity: event.target.value })} className="w-full rounded-2xl border px-3 py-2.5 pl-10" /></div></Field><Field label="Доступ"><select value={employeeForm.is_active ? 'active' : 'inactive'} onChange={(event) => setEmployeeForm({ ...employeeForm, is_active: event.target.value === 'active' })} className="w-full rounded-2xl border bg-white px-3 py-2.5"><option value="active">Показывать на входе</option><option value="inactive">Отключить</option></select></Field></div>
             <Field label="Цвет"><div className="grid grid-cols-9 gap-2 sm:grid-cols-12">{EMPLOYEE_COLORS.map((color) => <button key={color} type="button" onClick={() => setEmployeeForm({ ...employeeForm, color })} className={`h-9 w-9 rounded-xl border border-white shadow-sm transition hover:scale-110 ${employeeForm.color === color ? 'ring-2 ring-slate-900 ring-offset-2' : ''}`} style={{ backgroundColor: color }} title={color} />)}<input type="color" value={employeeForm.color} onChange={(event) => setEmployeeForm({ ...employeeForm, color: event.target.value })} className="h-9 w-9 cursor-pointer rounded-xl border bg-white p-1" /></div></Field>
             <div className="rounded-2xl bg-slate-50 p-4"><div className="flex items-center gap-3"><span className="flex h-11 w-11 items-center justify-center rounded-2xl text-sm font-bold" style={{ backgroundColor: employeeForm.color, color: contrastTextColor(employeeForm.color) }}>{employeeInitials(employeeForm.name || 'Новый')}</span><div><b>{employeeForm.name || 'Новый сотрудник'}</b><p className="text-sm text-slate-500">{employeeForm.role || 'Сотрудник'}</p></div></div></div>
           </div>
