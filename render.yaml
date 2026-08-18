@@ -5,7 +5,7 @@ services:
     plan: free
     buildCommand: npm install && npm run build
     startCommand: npm start
-    healthCheckPath: /api/ai/health
+    healthCheckPath: /healthz
     envVars:
       - key: VITE_SUPABASE_URL
         sync: false

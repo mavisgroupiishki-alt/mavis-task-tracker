@@ -20,6 +20,12 @@ app.disable('x-powered-by');
 app.set('trust proxy', 1);
 app.use(express.json({ limit: '3mb' }));
 
+// Render health check must verify only that this Node service is alive.
+// It must NOT depend on Supabase, Bitrix VibeCode, or any external API.
+app.get('/healthz', (_req, res) => {
+  res.status(200).json({ ok: true, service: 'mavis-task-tracker', version: '6.2.1' });
+});
+
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: MAX_AUDIO_BYTES, files: 1 },
