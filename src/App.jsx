@@ -27,6 +27,7 @@ import {
   HeartPulse,
   GripVertical,
   History,
+  Inbox,
   Layers3,
   LayoutTemplate,
   Link2,
@@ -291,6 +292,8 @@ function normalizeProject(project, index = 0) {
     color: project.color || PROJECT_COLORS[index % PROJECT_COLORS.length],
     archived: Boolean(project.archived),
     archived_at: project.archived_at || '',
+    backlog: Boolean(project.backlog),
+    backlog_at: project.backlog_at || '',
     created_at: project.created_at || new Date().toISOString(),
   };
 }
@@ -341,6 +344,8 @@ function normalizeTask(task) {
     project_id: task.project_id || null,
     stage_id: task.stage_id || null,
     section_id: task.section_id || null,
+    backlog: Boolean(task.backlog),
+    backlog_at: task.backlog_at || '',
     created_at: task.created_at || new Date().toISOString(),
   };
 }
@@ -1139,13 +1144,17 @@ export default function App() {
   const stageById = useMemo(() => new Map(stages.map((stage) => [String(stage.id), stage])), [stages]);
   const sectionById = useMemo(() => new Map(sections.map((section) => [String(section.id), section])), [sections]);
 
+  const workingTasks = useMemo(() => tasks.filter((task) => {
+    const project = projectById.get(String(task.project_id));
+    return !task.backlog && !project?.archived && !project?.backlog;
+  }), [tasks, projectById]);
+
   const filteredTasks = useMemo(() => {
     const query = search.trim().toLowerCase();
-    return tasks.filter((task) => {
+    return workingTasks.filter((task) => {
       const project = projectById.get(String(task.project_id));
       const stage = stageById.get(String(task.stage_id));
       const section = sectionById.get(String(project?.section_id || task.section_id));
-      if (project?.archived) return false;
       const matchesEmployee = selectedEmployee === 'Все' || task.owner === selectedEmployee;
       const matchesSearch = !query || `${task.title} ${task.owner} ${task.comment} ${task.resource_url} ${task.result} ${project?.name || ''} ${stage?.title || ''} ${section?.name || ''}`.toLowerCase().includes(query);
       const matchesFilter = taskFilter === 'all'
@@ -1162,16 +1171,21 @@ export default function App() {
       const matchesDate = matchesDateFilter(task.deadline, dateFilterMode, dateFilterDate);
       return matchesEmployee && matchesSearch && matchesFilter && matchesStatus && matchesSection && matchesPriority && matchesCustomer && matchesDate;
     });
-  }, [tasks, search, selectedEmployee, taskFilter, statusFilter, sectionFilter, priorityFilter, customerFilter, dateFilterMode, dateFilterDate, projectById, stageById, sectionById]);
+  }, [workingTasks, search, selectedEmployee, taskFilter, statusFilter, sectionFilter, priorityFilter, customerFilter, dateFilterMode, dateFilterDate, projectById, stageById, sectionById]);
 
-  const activeProjects = useMemo(() => projects.filter((project) => !project.archived), [projects]);
+  const activeProjects = useMemo(() => projects.filter((project) => !project.archived && !project.backlog), [projects]);
+  const backlogProjects = useMemo(() => projects.filter((project) => !project.archived && project.backlog), [projects]);
   const archivedProjects = useMemo(() => projects.filter((project) => project.archived), [projects]);
+  const backlogTasks = useMemo(() => tasks.filter((task) => {
+    const project = projectById.get(String(task.project_id));
+    return Boolean(task.backlog) && !project?.archived && !project?.backlog;
+  }), [tasks, projectById]);
   const customers = useMemo(() => [...new Set(projects.map((project) => String(project.customer || '').trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'ru')), [projects]);
 
-  const applyProjectFilters = (sourceProjects) => {
+  const applyProjectFilters = (sourceProjects, sourceTaskPool = workingTasks) => {
     const query = search.trim().toLowerCase();
     return sourceProjects.filter((project) => {
-      const allProjectTasks = tasks.filter((task) => String(task.project_id) === String(project.id));
+      const allProjectTasks = sourceTaskPool.filter((task) => String(task.project_id) === String(project.id));
       const visibleProjectTasks = filteredTasks.filter((task) => String(task.project_id) === String(project.id));
       const employeeMatch = selectedEmployee === 'Все' || project.owner === selectedEmployee || allProjectTasks.some((task) => task.owner === selectedEmployee);
       const projectSection = sectionById.get(String(project.section_id));
@@ -1188,8 +1202,32 @@ export default function App() {
     });
   };
 
-  const filteredProjects = useMemo(() => applyProjectFilters(activeProjects), [activeProjects, tasks, filteredTasks, search, selectedEmployee, dateFilterMode, dateFilterDate, sectionFilter, priorityFilter, customerFilter, statusFilter, sectionById]);
-  const filteredArchivedProjects = useMemo(() => applyProjectFilters(archivedProjects), [archivedProjects, tasks, filteredTasks, search, selectedEmployee, dateFilterMode, dateFilterDate, sectionFilter, priorityFilter, customerFilter, statusFilter, sectionById]);
+  const filteredProjects = useMemo(() => applyProjectFilters(activeProjects, workingTasks), [activeProjects, workingTasks, filteredTasks, search, selectedEmployee, dateFilterMode, dateFilterDate, sectionFilter, priorityFilter, customerFilter, statusFilter, sectionById]);
+  const filteredArchivedProjects = useMemo(() => applyProjectFilters(archivedProjects, tasks), [archivedProjects, tasks, filteredTasks, search, selectedEmployee, dateFilterMode, dateFilterDate, sectionFilter, priorityFilter, customerFilter, statusFilter, sectionById]);
+
+  const filteredBacklogProjects = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    return backlogProjects.filter((project) => {
+      const projectTasks = tasks.filter((task) => String(task.project_id) === String(project.id));
+      const section = sectionById.get(String(project.section_id));
+      const matchesEmployee = selectedEmployee === 'Все' || project.owner === selectedEmployee || projectTasks.some((task) => task.owner === selectedEmployee);
+      const matchesSearch = !query || `${project.name} ${project.description} ${project.owner} ${project.customer} ${section?.name || ''}`.toLowerCase().includes(query)
+        || projectTasks.some((task) => `${task.title} ${task.comment}`.toLowerCase().includes(query));
+      return matchesEmployee && matchesSearch;
+    });
+  }, [backlogProjects, tasks, search, selectedEmployee, sectionById]);
+
+  const filteredBacklogTasks = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    return backlogTasks.filter((task) => {
+      const project = projectById.get(String(task.project_id));
+      const stage = stageById.get(String(task.stage_id));
+      const section = sectionById.get(String(project?.section_id || task.section_id));
+      const matchesEmployee = selectedEmployee === 'Все' || task.owner === selectedEmployee;
+      const matchesSearch = !query || `${task.title} ${task.comment} ${task.result} ${project?.name || ''} ${stage?.title || ''} ${section?.name || ''}`.toLowerCase().includes(query);
+      return matchesEmployee && matchesSearch;
+    });
+  }, [backlogTasks, search, selectedEmployee, projectById, stageById, sectionById]);
 
 
   const filteredSections = useMemo(() => {
@@ -1197,7 +1235,7 @@ export default function App() {
     return sections.filter((section) => {
       const sectionProjects = activeProjects.filter((project) => String(project.section_id) === String(section.id));
       const projectIds = new Set(sectionProjects.map((project) => String(project.id)));
-      const allSectionTasks = tasks.filter((task) => projectIds.has(String(task.project_id)) || (!task.project_id && String(task.section_id) === String(section.id)));
+      const allSectionTasks = workingTasks.filter((task) => projectIds.has(String(task.project_id)) || (!task.project_id && String(task.section_id) === String(section.id)));
       const visibleSectionTasks = filteredTasks.filter((task) => projectIds.has(String(task.project_id)) || (!task.project_id && String(task.section_id) === String(section.id)));
       const visibleSectionProjects = filteredProjects.filter((project) => String(project.section_id) === String(section.id));
       const employeeMatch = selectedEmployee === 'Все'
@@ -1212,7 +1250,7 @@ export default function App() {
       const sectionMatch = sectionFilter === 'all' || String(section.id) === String(sectionFilter);
       return employeeMatch && searchMatch && dateMatch && sectionMatch;
     });
-  }, [sections, activeProjects, tasks, filteredTasks, filteredProjects, search, selectedEmployee, dateFilterMode, sectionFilter]);
+  }, [sections, activeProjects, workingTasks, filteredTasks, filteredProjects, search, selectedEmployee, dateFilterMode, sectionFilter]);
 
   const calendarTasks = useMemo(() => {
     const weekStart = getWeekStart(selectedDate);
@@ -1243,15 +1281,15 @@ export default function App() {
 
   const summary = useMemo(() => ({
     projects: activeProjects.filter((project) => project.status !== 'Готово').length,
-    tasks: tasks.length,
-    active: tasks.filter((task) => !isTaskCompleted(task)).length,
-    done: tasks.filter((task) => isTaskCompleted(task)).length,
-    overdue: tasks.filter((task) => task.deadline < todayIso() && !isTaskCompleted(task)).length,
+    tasks: workingTasks.length,
+    active: workingTasks.filter((task) => !isTaskCompleted(task)).length,
+    done: workingTasks.filter((task) => isTaskCompleted(task)).length,
+    overdue: workingTasks.filter((task) => task.deadline < todayIso() && !isTaskCompleted(task)).length,
     carryovers: currentWeekCarryovers.length,
-  }), [activeProjects, tasks, currentWeekCarryovers]);
+  }), [activeProjects, workingTasks, currentWeekCarryovers]);
 
   const workload = useMemo(() => employees.filter((employee) => employee.is_active !== false).map((employee) => {
-    const personTasks = tasks.filter((task) => task.owner === employee.name && !isTaskCompleted(task));
+    const personTasks = workingTasks.filter((task) => task.owner === employee.name && !isTaskCompleted(task));
     const capacity = Math.max(1, Number(employee.task_capacity || 10));
     const active = personTasks.length;
     const ratio = active / capacity;
@@ -1264,27 +1302,27 @@ export default function App() {
       ratio,
       color: ratio > 1.25 ? '#ef4444' : ratio > 1 ? '#f59e0b' : employee.color,
     };
-  }), [employees, tasks]);
+  }), [employees, workingTasks]);
 
   const overloadedEmployees = useMemo(() => workload.filter((item) => item.overload > 0).sort((a, b) => b.ratio - a.ratio), [workload]);
 
   const taskStatusChart = useMemo(() => TASK_STATUSES
     .map((status, index) => ({
       name: status,
-      value: tasks.filter((task) => task.status === status && !isTaskCompleted(task)).length,
+      value: workingTasks.filter((task) => task.status === status && !isTaskCompleted(task)).length,
       color: STATUS_CHART_COLORS[index % STATUS_CHART_COLORS.length],
     }))
-    .filter((item) => item.value > 0), [tasks]);
+    .filter((item) => item.value > 0), [workingTasks]);
 
   const taskCountBySection = useMemo(() => {
     const counts = new Map();
-    tasks.forEach((task) => {
+    workingTasks.forEach((task) => {
       const project = projectById.get(String(task.project_id));
       const sectionId = String(project?.section_id || task.section_id || '');
       if (sectionId) counts.set(sectionId, (counts.get(sectionId) || 0) + 1);
     });
     return counts;
-  }, [tasks, projectById]);
+  }, [workingTasks, projectById]);
 
   function showAllTasksForSection(nextSectionId) {
     setSectionFilter(nextSectionId);
@@ -1948,6 +1986,41 @@ export default function App() {
     } catch (error) { setProjects(previous); setMessage(`Не удалось изменить архив: ${error.message}`); }
   }
 
+  async function setProjectBacklog(project, backlog) {
+    const previous = project;
+    const backlogAt = backlog ? new Date().toISOString() : '';
+    const updated = { ...project, backlog, backlog_at: backlogAt };
+    setProjects((items) => items.map((item) => String(item.id) === String(project.id) ? updated : item));
+    try {
+      if (supabase && isRemoteId(project.id)) {
+        const { error } = await supabase.from('projects').update({ backlog, backlog_at: backlog ? backlogAt : null }).eq('id', project.id);
+        if (error) throw error;
+      }
+      setMessage(backlog ? `Проект «${project.name}» перемещён в бэклог.` : `Проект «${project.name}» возвращён в работу.`);
+    } catch (error) {
+      setProjects((items) => items.map((item) => String(item.id) === String(project.id) ? previous : item));
+      setMessage(`Не удалось изменить бэклог проекта. Выполните supabase_v6_2_3_backlog.sql. ${error.message}`);
+    }
+  }
+
+  async function setTaskBacklog(task, backlog) {
+    const previous = task;
+    const backlogAt = backlog ? new Date().toISOString() : '';
+    const updated = { ...task, backlog, backlog_at: backlogAt };
+    setTasks((items) => items.map((item) => String(item.id) === String(task.id) ? updated : item));
+    setSelectedTaskIds((items) => items.filter((id) => String(id) !== String(task.id)));
+    try {
+      if (supabase && isRemoteId(task.id)) {
+        const { error } = await supabase.from('tasks').update({ backlog, backlog_at: backlog ? backlogAt : null }).eq('id', task.id);
+        if (error) throw error;
+      }
+      setMessage(backlog ? `Задача «${task.title}» перемещена в бэклог.` : `Задача «${task.title}» возвращена в работу.`);
+    } catch (error) {
+      setTasks((items) => items.map((item) => String(item.id) === String(task.id) ? previous : item));
+      setMessage(`Не удалось изменить бэклог задачи. Выполните supabase_v6_2_3_backlog.sql. ${error.message}`);
+    }
+  }
+
   async function archiveFinishedProjects() {
     const candidates = activeProjects.filter((project) => {
       const projectTasks = tasks.filter((task) => String(task.project_id) === String(project.id));
@@ -2116,7 +2189,7 @@ export default function App() {
 
   function renderHierarchyProject(project, localStatusMode = 'active') {
     const projectStages = stages.filter((stage) => String(stage.project_id) === String(project.id)).sort((a, b) => a.sort_order - b.sort_order);
-    const allProjectTasks = tasks.filter((task) => String(task.project_id) === String(project.id));
+    const allProjectTasks = workingTasks.filter((task) => String(task.project_id) === String(project.id));
     const visibleProjectTasks = filteredTasks
       .filter((task) => String(task.project_id) === String(project.id))
       .filter((task) => matchesLocalTaskStatus(task, localStatusMode));
@@ -2148,6 +2221,7 @@ export default function App() {
               <button type="button" onClick={() => openStageModal(project.id)} className="inline-flex items-center rounded-lg bg-sky-50 px-2.5 py-1.5 font-medium text-sky-700"><Layers3 className="mr-1 h-3.5 w-3.5" />Этап</button>
               <button type="button" onClick={() => openTaskModal(null, project.id)} className="inline-flex items-center rounded-lg bg-violet-600 px-2.5 py-1.5 font-medium text-white"><Plus className="mr-1 h-3.5 w-3.5" />Задача</button>
               <button type="button" onClick={() => createTemplateFromProject(project)} className="rounded-lg border border-indigo-100 bg-indigo-50 p-1.5 text-indigo-700" title="Сохранить как шаблон"><ClipboardCopy className="h-3.5 w-3.5" /></button>
+              <button type="button" onClick={() => setProjectBacklog(project, true)} className="rounded-lg border border-amber-200 bg-amber-50 p-1.5 text-amber-800" title="В бэклог"><Inbox className="h-3.5 w-3.5" /></button>
               <button type="button" onClick={() => setProjectArchived(project, true)} className="rounded-lg border border-slate-200 bg-slate-50 p-1.5 text-slate-700" title="В архив"><Archive className="h-3.5 w-3.5" /></button>
               <button type="button" onClick={() => openProjectModal(project)} className="rounded-lg border p-1.5 text-slate-600"><Edit3 className="h-3.5 w-3.5" /></button>
             </div>
@@ -2180,7 +2254,7 @@ export default function App() {
                             <span className="text-sm font-medium">{task.owner}</span>
                             <select value={task.status} onChange={(event) => updateTaskStatus(task.id, event.target.value)} className={`rounded-xl border-0 px-2 py-1.5 text-sm ${statusStyle(task.status)}`}>{TASK_STATUSES.map((status) => <option key={status}>{status}</option>)}</select>
                             <div className="min-w-0 text-sm text-slate-600"><span className="line-clamp-2">{task.comment || '—'}</span><TaskResourceLink url={task.resource_url} compact /></div>
-                            <button type="button" onClick={() => openTaskModal(task)} className="rounded-lg bg-violet-50 p-2 text-violet-700"><Edit3 className="h-4 w-4" /></button>
+                            <span className="flex gap-1"><button type="button" onClick={() => setTaskBacklog(task, true)} className="rounded-lg bg-amber-50 p-2 text-amber-800" title="В бэклог"><Inbox className="h-4 w-4" /></button><button type="button" onClick={() => openTaskModal(task)} className="rounded-lg bg-violet-50 p-2 text-violet-700"><Edit3 className="h-4 w-4" /></button></span>
                           </div>
                         ))}
                         {stageTasks.length === 0 && <div className="p-4 text-center text-sm text-slate-500">По выбранному фильтру задач нет.</div>}
@@ -2247,7 +2321,7 @@ export default function App() {
           <div className="flex flex-col gap-6 xl:flex-row xl:items-center xl:justify-between">
             <div className="max-w-3xl">
               <div className="mb-3 inline-flex items-center rounded-full bg-white/10 px-3 py-1 text-xs font-medium text-violet-100 ring-1 ring-white/10">
-                <Sparkles className="mr-2 h-3.5 w-3.5" /> MAVIS GROUP · центр проектов · версия 6.2
+                <Sparkles className="mr-2 h-3.5 w-3.5" /> MAVIS GROUP · центр проектов · версия 6.2.3
               </div>
               <h1 className="text-3xl font-bold tracking-tight md:text-4xl">Разделы → проекты → этапы → задачи</h1>
               <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-300 md:text-base">Собирайте проекты по направлениям, управляйте стадиями и показывайте только нужные статусы задач без потери общей истории.</p>
@@ -2300,6 +2374,7 @@ export default function App() {
                   ['projects', 'Проекты', FolderKanban],
                   ['calendar', 'Календарь', CalendarDays],
                   ['tasks', 'Задачи', ListChecks],
+                  ['backlog', 'Бэклог', Inbox],
                   ['ai', 'ИИ-помощник', Sparkles],
                   ['templates', 'Шаблоны', LayoutTemplate],
                   ['archive', 'Архив', Archive],
@@ -2392,7 +2467,7 @@ export default function App() {
             {filteredProjects.map((project) => {
               const projectStages = stages.filter((stage) => String(stage.project_id) === String(project.id)).sort((a, b) => a.sort_order - b.sort_order);
               const projectTasks = filteredTasks.filter((task) => String(task.project_id) === String(project.id));
-              const allProjectTasks = tasks.filter((task) => String(task.project_id) === String(project.id));
+              const allProjectTasks = workingTasks.filter((task) => String(task.project_id) === String(project.id));
               const directProjectTasks = projectTasks.filter((task) => !task.stage_id);
               const allDirectProjectTasks = allProjectTasks.filter((task) => !task.stage_id);
               const progress = calculateProgress(allProjectTasks);
@@ -2419,14 +2494,14 @@ export default function App() {
                         <button type="button" onClick={() => openStageModal(project.id)} className="inline-flex items-center rounded-xl bg-sky-50 px-3 py-2 font-medium text-sky-700 hover:bg-sky-100"><Layers3 className="mr-1.5 h-4 w-4" />Этап</button>
                         <button type="button" onClick={() => openTaskModal(null, project.id)} className="inline-flex items-center rounded-xl bg-violet-50 px-3 py-2 font-medium text-violet-700 hover:bg-violet-100"><Plus className="mr-1.5 h-4 w-4" />Задача</button>
                         <button type="button" onClick={() => openProjectModal(project)} className="rounded-xl border px-3 py-2 text-slate-600 hover:bg-slate-50"><Edit3 className="h-4 w-4" /></button>
-                        <button type="button" onClick={() => createTemplateFromProject(project)} className="rounded-xl border border-indigo-100 px-3 py-2 text-indigo-700 hover:bg-indigo-50" title="Создать шаблон"><ClipboardCopy className="h-4 w-4" /></button><button type="button" onClick={() => setProjectArchived(project, true)} className="rounded-xl border border-slate-200 px-3 py-2 text-slate-700 hover:bg-slate-50" title="В архив"><Archive className="h-4 w-4" /></button><button type="button" onClick={() => deleteProject(project)} className="rounded-xl border border-rose-100 px-3 py-2 text-rose-600 hover:bg-rose-50"><Trash2 className="h-4 w-4" /></button>
+                        <button type="button" onClick={() => createTemplateFromProject(project)} className="rounded-xl border border-indigo-100 px-3 py-2 text-indigo-700 hover:bg-indigo-50" title="Создать шаблон"><ClipboardCopy className="h-4 w-4" /></button><button type="button" onClick={() => setProjectBacklog(project, true)} className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-amber-800 hover:bg-amber-100" title="В бэклог"><Inbox className="h-4 w-4" /></button><button type="button" onClick={() => setProjectArchived(project, true)} className="rounded-xl border border-slate-200 px-3 py-2 text-slate-700 hover:bg-slate-50" title="В архив"><Archive className="h-4 w-4" /></button><button type="button" onClick={() => deleteProject(project)} className="rounded-xl border border-rose-100 px-3 py-2 text-rose-600 hover:bg-rose-50"><Trash2 className="h-4 w-4" /></button>
                       </div>
                     </div>
 
                     {expanded && (
                       <div className="mt-6 space-y-3">
                         {projectStages.map((stage) => {
-                          const allStageTasks = tasks.filter((task) => String(task.stage_id) === String(stage.id));
+                          const allStageTasks = workingTasks.filter((task) => String(task.stage_id) === String(stage.id));
                           const stageTasks = projectTasks.filter((task) => String(task.stage_id) === String(stage.id));
                           const stageProgress = calculateProgress(allStageTasks);
                           const stageStatus = deriveStatus(allStageTasks);
@@ -2464,7 +2539,7 @@ export default function App() {
                                       <span className="text-sm font-medium">{task.owner}</span>
                                       <select value={task.status} onChange={(event) => updateTaskStatus(task.id, event.target.value)} className={`rounded-xl border-0 px-2.5 py-2 text-sm ${statusStyle(task.status)}`}>{TASK_STATUSES.map((status) => <option key={status}>{status}</option>)}</select>
                                       <div className="min-w-0 text-sm text-slate-600"><span className="block">{task.comment || '—'}</span><TaskResourceLink url={task.resource_url} compact /></div>
-                                      <span className="flex gap-1"><button type="button" onClick={() => openTaskModal(task)} className="rounded-lg bg-violet-50 p-2 text-violet-700 hover:bg-violet-100"><Edit3 className="h-4 w-4" /></button><button type="button" onClick={() => deleteTask(task)} className="rounded-lg bg-rose-50 p-2 text-rose-600 hover:bg-rose-100"><Trash2 className="h-4 w-4" /></button></span>
+                                      <span className="flex gap-1"><button type="button" onClick={() => setTaskBacklog(task, true)} className="rounded-lg bg-amber-50 p-2 text-amber-800 hover:bg-amber-100" title="В бэклог"><Inbox className="h-4 w-4" /></button><button type="button" onClick={() => openTaskModal(task)} className="rounded-lg bg-violet-50 p-2 text-violet-700 hover:bg-violet-100"><Edit3 className="h-4 w-4" /></button><button type="button" onClick={() => deleteTask(task)} className="rounded-lg bg-rose-50 p-2 text-rose-600 hover:bg-rose-100"><Trash2 className="h-4 w-4" /></button></span>
                                     </div>
                                   ))}
                                   {stageTasks.length === 0 && <div className="p-5 text-center text-sm text-slate-500">В этом этапе пока нет задач.</div>}
@@ -2494,7 +2569,7 @@ export default function App() {
                                   <span className="text-sm font-medium">{task.owner}</span>
                                   <select value={task.status} onChange={(event) => updateTaskStatus(task.id, event.target.value)} className={`rounded-xl border-0 px-2.5 py-2 text-sm ${statusStyle(task.status)}`}>{TASK_STATUSES.map((status) => <option key={status}>{status}</option>)}</select>
                                   <div className="min-w-0 text-sm text-slate-600"><span className="block">{task.comment || '—'}</span><TaskResourceLink url={task.resource_url} compact /></div>
-                                  <span className="flex gap-1"><button type="button" onClick={() => openTaskModal(task)} className="rounded-lg bg-violet-50 p-2 text-violet-700 hover:bg-violet-100"><Edit3 className="h-4 w-4" /></button><button type="button" onClick={() => deleteTask(task)} className="rounded-lg bg-rose-50 p-2 text-rose-600 hover:bg-rose-100"><Trash2 className="h-4 w-4" /></button></span>
+                                  <span className="flex gap-1"><button type="button" onClick={() => setTaskBacklog(task, true)} className="rounded-lg bg-amber-50 p-2 text-amber-800 hover:bg-amber-100" title="В бэклог"><Inbox className="h-4 w-4" /></button><button type="button" onClick={() => openTaskModal(task)} className="rounded-lg bg-violet-50 p-2 text-violet-700 hover:bg-violet-100"><Edit3 className="h-4 w-4" /></button><button type="button" onClick={() => deleteTask(task)} className="rounded-lg bg-rose-50 p-2 text-rose-600 hover:bg-rose-100"><Trash2 className="h-4 w-4" /></button></span>
                                 </div>
                               ))}
                             </div>
@@ -2534,7 +2609,7 @@ export default function App() {
               const sectionProjects = filteredProjects.filter((project) => String(project.section_id) === String(section.id));
               const allSectionProjects = activeProjects.filter((project) => String(project.section_id) === String(section.id));
               const projectIds = new Set(allSectionProjects.map((project) => String(project.id)));
-              const allSectionTasks = tasks.filter((task) => projectIds.has(String(task.project_id)) || (!task.project_id && String(task.section_id) === String(section.id)));
+              const allSectionTasks = workingTasks.filter((task) => projectIds.has(String(task.project_id)) || (!task.project_id && String(task.section_id) === String(section.id)));
               const directSectionTasks = filteredTasks.filter((task) => !task.project_id && String(task.section_id) === String(section.id));
               const localStatusMode = sectionStatusFilters[section.id] || 'active';
               const visibleDirectTasks = directSectionTasks.filter((task) => matchesLocalTaskStatus(task, localStatusMode));
@@ -2617,17 +2692,60 @@ export default function App() {
               <div className="space-y-3">{filteredTasks.map((task) => {
                 const project = projectById.get(String(task.project_id));
                 const stage = stageById.get(String(task.stage_id));
-                return <div key={task.id} className={`rounded-2xl border bg-white p-4 hover:border-violet-200 hover:shadow-sm ${selectedTaskIds.includes(String(task.id)) ? 'ring-2 ring-violet-300' : ''}`}><div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between"><div className="flex min-w-0 gap-3"><input type="checkbox" checked={selectedTaskIds.includes(String(task.id))} onChange={(event) => setSelectedTaskIds((items) => event.target.checked ? [...new Set([...items, String(task.id)])] : items.filter((id) => id !== String(task.id)))} className="mt-1 h-4 w-4 accent-violet-600" /><div className="space-y-2"><div className="flex flex-wrap gap-2"><span className={`rounded-full px-3 py-1 text-xs ${statusStyle(task.status)}`}>{task.status}</span><span className={`rounded-full px-3 py-1 text-xs ${priorityStyle(task.priority)}`}>{task.priority}</span>{project && <span className="rounded-full bg-violet-50 px-3 py-1 text-xs text-violet-700">{project.name}</span>}{stage && <span className="rounded-full bg-sky-50 px-3 py-1 text-xs text-sky-700">{stage.title}</span>}{sectionById.get(String(project?.section_id || task.section_id)) && <span className="rounded-full bg-cyan-50 px-3 py-1 text-xs text-cyan-700">{sectionById.get(String(project?.section_id || task.section_id)).name}</span>}</div><h3 className="text-lg font-semibold">{task.title}</h3><p className="text-sm text-slate-600"><b>Комментарий:</b> {task.comment || '—'}</p>{task.resource_url && <TaskResourceLink url={task.resource_url} />}<p className="text-sm text-slate-500">{task.owner} · {formatDate(task.deadline)} · {formatTime(task.start_time)}{task.end_time ? `–${formatTime(task.end_time)}` : ''} · {task.hours} ч</p></div></div><div className="flex flex-wrap gap-2"><select value={task.status} onChange={(event) => updateTaskStatus(task.id, event.target.value)} className={`rounded-xl border-0 px-3 py-2 text-sm ${statusStyle(task.status)}`}>{TASK_STATUSES.map((status) => <option key={status}>{status}</option>)}</select><button type="button" onClick={() => openTaskModal(task)} className="inline-flex items-center rounded-xl bg-violet-50 px-3 py-2 text-sm font-medium text-violet-700"><Edit3 className="mr-2 h-4 w-4" />Изменить</button><button type="button" onClick={() => deleteTask(task)} className="rounded-xl border border-rose-100 px-3 py-2 text-rose-600"><Trash2 className="h-4 w-4" /></button></div></div></div>;
+                return <div key={task.id} className={`rounded-2xl border bg-white p-4 hover:border-violet-200 hover:shadow-sm ${selectedTaskIds.includes(String(task.id)) ? 'ring-2 ring-violet-300' : ''}`}><div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between"><div className="flex min-w-0 gap-3"><input type="checkbox" checked={selectedTaskIds.includes(String(task.id))} onChange={(event) => setSelectedTaskIds((items) => event.target.checked ? [...new Set([...items, String(task.id)])] : items.filter((id) => id !== String(task.id)))} className="mt-1 h-4 w-4 accent-violet-600" /><div className="space-y-2"><div className="flex flex-wrap gap-2"><span className={`rounded-full px-3 py-1 text-xs ${statusStyle(task.status)}`}>{task.status}</span><span className={`rounded-full px-3 py-1 text-xs ${priorityStyle(task.priority)}`}>{task.priority}</span>{project && <span className="rounded-full bg-violet-50 px-3 py-1 text-xs text-violet-700">{project.name}</span>}{stage && <span className="rounded-full bg-sky-50 px-3 py-1 text-xs text-sky-700">{stage.title}</span>}{sectionById.get(String(project?.section_id || task.section_id)) && <span className="rounded-full bg-cyan-50 px-3 py-1 text-xs text-cyan-700">{sectionById.get(String(project?.section_id || task.section_id)).name}</span>}</div><h3 className="text-lg font-semibold">{task.title}</h3><p className="text-sm text-slate-600"><b>Комментарий:</b> {task.comment || '—'}</p>{task.resource_url && <TaskResourceLink url={task.resource_url} />}<p className="text-sm text-slate-500">{task.owner} · {formatDate(task.deadline)} · {formatTime(task.start_time)}{task.end_time ? `–${formatTime(task.end_time)}` : ''} · {task.hours} ч</p></div></div><div className="flex flex-wrap gap-2"><select value={task.status} onChange={(event) => updateTaskStatus(task.id, event.target.value)} className={`rounded-xl border-0 px-3 py-2 text-sm ${statusStyle(task.status)}`}>{TASK_STATUSES.map((status) => <option key={status}>{status}</option>)}</select><button type="button" onClick={() => setTaskBacklog(task, true)} className="inline-flex items-center rounded-xl bg-amber-50 px-3 py-2 text-sm font-medium text-amber-800"><Inbox className="mr-2 h-4 w-4" />В бэклог</button><button type="button" onClick={() => openTaskModal(task)} className="inline-flex items-center rounded-xl bg-violet-50 px-3 py-2 text-sm font-medium text-violet-700"><Edit3 className="mr-2 h-4 w-4" />Изменить</button><button type="button" onClick={() => deleteTask(task)} className="rounded-xl border border-rose-100 px-3 py-2 text-rose-600"><Trash2 className="h-4 w-4" /></button></div></div></div>;
               })}{filteredTasks.length === 0 && <div className="rounded-2xl border border-dashed p-8 text-center text-slate-500">По выбранным фильтрам задач нет.</div>}</div>
             </div>
           </Card>
         )}
 
+        {activeTab === 'backlog' && (
+          <div className="space-y-5">
+            <Card>
+              <div className="p-5 md:p-6">
+                <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                  <div><h2 className="flex items-center text-2xl font-bold"><Inbox className="mr-2 h-6 w-6 text-amber-600" />Бэклог</h2><p className="mt-1 text-sm text-slate-500">Сюда складываем проекты и задачи, которые сейчас неактуальны, но удалять или закрывать их не нужно. Они не попадают в рабочие списки, календарь и загрузку команды.</p></div>
+                  <div className="flex flex-wrap gap-2"><span className="rounded-xl bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-900">{backlogProjects.length} проектов</span><span className="rounded-xl bg-slate-100 px-3 py-2 text-sm font-semibold text-slate-700">{backlogTasks.length} отдельных задач</span></div>
+                </div>
+              </div>
+            </Card>
+
+            <div className="grid gap-5 xl:grid-cols-2">
+              <Card>
+                <div className="p-5">
+                  <div className="mb-4"><h3 className="text-xl font-semibold">Проекты в бэклоге</h3><p className="text-sm text-slate-500">При возврате проект снова появится в разделах и рабочих списках вместе со своими задачами.</p></div>
+                  <div className="space-y-3">
+                    {filteredBacklogProjects.map((project) => {
+                      const projectTasks = tasks.filter((task) => String(task.project_id) === String(project.id));
+                      const section = sectionById.get(String(project.section_id));
+                      return <div key={project.id} className="rounded-2xl border border-amber-200 bg-amber-50/40 p-4"><div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><b className="text-base">{project.name}</b><span className="rounded-full bg-amber-100 px-2.5 py-1 text-xs font-medium text-amber-900">В бэклоге</span></div><p className="mt-1 text-sm text-slate-500">{project.description || 'Описание проекта не заполнено'}</p><p className="mt-2 text-xs text-slate-500">{section?.name || 'Без раздела'} · {project.owner}{project.customer ? ` · Заказчик: ${project.customer}` : ''} · {projectTasks.length} задач{project.backlog_at ? ` · с ${formatDateTime(project.backlog_at)}` : ''}</p></div><button type="button" onClick={() => setProjectBacklog(project, false)} className="inline-flex shrink-0 items-center rounded-xl bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-100"><Undo2 className="mr-2 h-4 w-4" />Вернуть в работу</button></div>{projectTasks.length > 0 && <div className="mt-3 space-y-1 border-t border-amber-100 pt-3">{projectTasks.slice(0, 5).map((task) => <div key={task.id} className="flex items-center justify-between gap-3 text-sm"><span className="truncate">{task.title}</span><span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] ${statusStyle(task.status)}`}>{task.status}</span></div>)}{projectTasks.length > 5 && <p className="text-xs text-slate-400">Ещё {projectTasks.length - 5} задач</p>}</div>}</div>;
+                    })}
+                    {filteredBacklogProjects.length === 0 && <div className="rounded-2xl border border-dashed p-8 text-center text-slate-500">Проектов в бэклоге пока нет.</div>}
+                  </div>
+                </div>
+              </Card>
+
+              <Card>
+                <div className="p-5">
+                  <div className="mb-4"><h3 className="text-xl font-semibold">Отдельные задачи в бэклоге</h3><p className="text-sm text-slate-500">Это задачи, которые убраны из работы отдельно, без переноса всего проекта.</p></div>
+                  <div className="space-y-3">
+                    {filteredBacklogTasks.map((task) => {
+                      const project = projectById.get(String(task.project_id));
+                      const stage = stageById.get(String(task.stage_id));
+                      return <div key={task.id} className="rounded-2xl border bg-white p-4"><div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between"><div className="min-w-0"><div className="flex flex-wrap gap-2"><span className={`rounded-full px-2.5 py-1 text-xs ${statusStyle(task.status)}`}>{task.status}</span><span className={`rounded-full px-2.5 py-1 text-xs ${priorityStyle(task.priority)}`}>{task.priority}</span></div><b className="mt-2 block">{task.title}</b><p className="mt-1 text-sm text-slate-500">{project?.name || 'Без проекта'}{stage ? ` · ${stage.title}` : ''} · {task.owner} · {formatDate(task.deadline)}</p>{task.comment && <p className="mt-2 text-sm text-slate-600">{task.comment}</p>}</div><div className="flex shrink-0 gap-2"><button type="button" onClick={() => setTaskBacklog(task, false)} className="inline-flex items-center rounded-xl bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-100"><Undo2 className="mr-2 h-4 w-4" />Вернуть</button><button type="button" onClick={() => openTaskModal(task)} className="rounded-xl bg-violet-50 p-2 text-violet-700" title="Редактировать"><Edit3 className="h-4 w-4" /></button></div></div></div>;
+                    })}
+                    {filteredBacklogTasks.length === 0 && <div className="rounded-2xl border border-dashed p-8 text-center text-slate-500">Отдельных задач в бэклоге пока нет.</div>}
+                  </div>
+                </div>
+              </Card>
+            </div>
+          </div>
+        )}
+
         {activeTab === 'ai' && (
           <AiAssistantPanel
             sections={sections}
-            projects={projects}
-            stages={stages}
+            projects={activeProjects}
+            stages={stages.filter((stage) => activeProjects.some((project) => String(project.id) === String(stage.project_id)))}
             employees={employees}
             currentUser={currentUser}
             onCreateTasks={createAiTasks}
@@ -2677,7 +2795,7 @@ export default function App() {
 
         {activeTab === 'team' && (
           <div className="grid gap-5 xl:grid-cols-[1.1fr_1fr]">
-            <Card><div className="p-5"><div className="mb-5 flex items-center justify-between"><div><h2 className="text-xl font-semibold">Команда</h2><p className="text-sm text-slate-500">Карточка подсвечивается, когда активных задач больше установленной нормы.</p></div>{isAdmin && <button type="button" onClick={() => openEmployeeModal()} className="inline-flex items-center rounded-xl bg-sky-600 px-4 py-2 text-sm font-medium text-white"><UserPlus className="mr-2 h-4 w-4" />Добавить</button>}</div><div className="grid gap-3 sm:grid-cols-2">{employees.map((employee) => { const allPersonTasks = tasks.filter((task) => task.owner === employee.name); const activePersonTasks = allPersonTasks.filter((task) => !isTaskCompleted(task)); const overduePersonTasks = activePersonTasks.filter((task) => task.deadline < todayIso()); const capacity = Math.max(1, Number(employee.task_capacity || 10)); const overload = Math.max(0, activePersonTasks.length - capacity); const critical = activePersonTasks.length > capacity * 1.25; return <div key={employee.id} className={`rounded-2xl border p-4 transition ${overload ? (critical ? 'border-rose-400 bg-rose-50 shadow-[0_0_0_3px_rgba(244,63,94,0.08)]' : 'border-amber-300 bg-amber-50') : 'border-slate-200 bg-white'}`}><div className="flex items-start justify-between gap-3"><div className="flex items-center gap-3"><span className="flex h-11 w-11 items-center justify-center rounded-2xl text-sm font-bold" style={{ backgroundColor: employee.color, color: contrastTextColor(employee.color) }}>{employeeInitials(employee.name)}</span><div><div className="flex flex-wrap items-center gap-2"><b>{employee.name}</b>{overload > 0 && <span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${critical ? 'bg-rose-600 text-white' : 'bg-amber-200 text-amber-900'}`}>Перегруз +{overload}</span>}{employee.is_active === false && <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[11px]">доступ отключён</span>}</div><p className="text-sm text-slate-500">{employee.role}</p><p className="mt-1 text-xs text-slate-400">Норма: {capacity} активных · вход по выбору имени</p></div></div>{isAdmin && <div className="flex gap-1"><button type="button" onClick={() => openEmployeeModal(employee)} className="rounded-lg p-2 text-violet-600 hover:bg-violet-50" title="Редактировать сотрудника и доступ"><Edit3 className="h-4 w-4" /></button><button type="button" onClick={() => deleteEmployee(employee)} className="rounded-lg p-2 text-rose-500 hover:bg-rose-50" title="Отключить доступ"><Trash2 className="h-4 w-4" /></button></div>}</div><div className="mt-4 grid grid-cols-3 gap-2 text-center text-xs"><span className="rounded-lg bg-violet-50 px-2 py-2 text-violet-800"><b className="block text-lg">{activePersonTasks.length}</b>активных</span><span className="rounded-lg bg-rose-100 px-2 py-2 text-rose-700"><b className="block text-lg">{overduePersonTasks.length}</b>просрочено</span><span className="rounded-lg bg-slate-100 px-2 py-2 text-slate-700"><b className="block text-lg">{capacity}</b>норма</span></div></div>; })}</div></div></Card>
+            <Card><div className="p-5"><div className="mb-5 flex items-center justify-between"><div><h2 className="text-xl font-semibold">Команда</h2><p className="text-sm text-slate-500">Карточка подсвечивается, когда активных задач больше установленной нормы.</p></div>{isAdmin && <button type="button" onClick={() => openEmployeeModal()} className="inline-flex items-center rounded-xl bg-sky-600 px-4 py-2 text-sm font-medium text-white"><UserPlus className="mr-2 h-4 w-4" />Добавить</button>}</div><div className="grid gap-3 sm:grid-cols-2">{employees.map((employee) => { const allPersonTasks = workingTasks.filter((task) => task.owner === employee.name); const activePersonTasks = allPersonTasks.filter((task) => !isTaskCompleted(task)); const overduePersonTasks = activePersonTasks.filter((task) => task.deadline < todayIso()); const capacity = Math.max(1, Number(employee.task_capacity || 10)); const overload = Math.max(0, activePersonTasks.length - capacity); const critical = activePersonTasks.length > capacity * 1.25; return <div key={employee.id} className={`rounded-2xl border p-4 transition ${overload ? (critical ? 'border-rose-400 bg-rose-50 shadow-[0_0_0_3px_rgba(244,63,94,0.08)]' : 'border-amber-300 bg-amber-50') : 'border-slate-200 bg-white'}`}><div className="flex items-start justify-between gap-3"><div className="flex items-center gap-3"><span className="flex h-11 w-11 items-center justify-center rounded-2xl text-sm font-bold" style={{ backgroundColor: employee.color, color: contrastTextColor(employee.color) }}>{employeeInitials(employee.name)}</span><div><div className="flex flex-wrap items-center gap-2"><b>{employee.name}</b>{overload > 0 && <span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${critical ? 'bg-rose-600 text-white' : 'bg-amber-200 text-amber-900'}`}>Перегруз +{overload}</span>}{employee.is_active === false && <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[11px]">доступ отключён</span>}</div><p className="text-sm text-slate-500">{employee.role}</p><p className="mt-1 text-xs text-slate-400">Норма: {capacity} активных · вход по выбору имени</p></div></div>{isAdmin && <div className="flex gap-1"><button type="button" onClick={() => openEmployeeModal(employee)} className="rounded-lg p-2 text-violet-600 hover:bg-violet-50" title="Редактировать сотрудника и доступ"><Edit3 className="h-4 w-4" /></button><button type="button" onClick={() => deleteEmployee(employee)} className="rounded-lg p-2 text-rose-500 hover:bg-rose-50" title="Отключить доступ"><Trash2 className="h-4 w-4" /></button></div>}</div><div className="mt-4 grid grid-cols-3 gap-2 text-center text-xs"><span className="rounded-lg bg-violet-50 px-2 py-2 text-violet-800"><b className="block text-lg">{activePersonTasks.length}</b>активных</span><span className="rounded-lg bg-rose-100 px-2 py-2 text-rose-700"><b className="block text-lg">{overduePersonTasks.length}</b>просрочено</span><span className="rounded-lg bg-slate-100 px-2 py-2 text-slate-700"><b className="block text-lg">{capacity}</b>норма</span></div></div>; })}</div></div></Card>
             <Card><div className="p-5"><h2 className="flex items-center text-xl font-semibold"><Gauge className="mr-2 h-5 w-5" />Активные задачи против нормы</h2><p className="mb-4 text-sm text-slate-500">Красный — критический перегруз, жёлтый — превышение нормы. Серый столбец показывает индивидуальную норму сотрудника.</p><div className="h-[360px]"><ResponsiveContainer width="100%" height="100%"><BarChart data={workload} layout="vertical" margin={{ left: 15, right: 25 }}><XAxis type="number" allowDecimals={false} /><YAxis dataKey="name" type="category" width={90} /><Tooltip formatter={(value, name, props) => [value, name === 'tasks' ? `Активные · ${props.payload.overdue} просрочено` : 'Норма']} /><Legend /><Bar dataKey="capacity" name="Норма" fill="#cbd5e1" radius={[0, 8, 8, 0]} /><Bar dataKey="tasks" name="Активные" radius={[0, 10, 10, 0]}>{workload.map((entry) => <Cell key={entry.name} fill={entry.color} />)}</Bar></BarChart></ResponsiveContainer></div></div></Card>
             <Card className="xl:col-span-2"><div className="p-5"><h2 className="flex items-center text-xl font-semibold"><BarChart3 className="mr-2 h-5 w-5" />Структура активных задач по статусам</h2><p className="mb-3 text-sm text-slate-500">Круговая диаграмма показывает, где сейчас сосредоточена работа команды и сколько задач находится в блокерах.</p><div className="h-[340px]">{taskStatusChart.length ? <ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={taskStatusChart} dataKey="value" nameKey="name" cx="50%" cy="48%" innerRadius={72} outerRadius={118} paddingAngle={3} label={({ name, value }) => `${name}: ${value}`}>{taskStatusChart.map((entry) => <Cell key={entry.name} fill={entry.color} />)}</Pie><Tooltip formatter={(value) => [`${value} задач`, 'Количество']} /><Legend verticalAlign="bottom" height={36} /></PieChart></ResponsiveContainer> : <div className="flex h-full items-center justify-center text-slate-500">Активных задач пока нет.</div>}</div></div></Card>
           </div>
