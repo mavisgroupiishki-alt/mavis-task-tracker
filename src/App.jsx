@@ -279,6 +279,26 @@ function normalizeEmployee(employee, index = 0) {
   };
 }
 
+
+function dedupeEmployeesByName(items = []) {
+  const unique = new Map();
+  for (const item of items) {
+    const employee = normalizeEmployee(item);
+    const key = String(employee.name || '').trim().toLowerCase();
+    if (!key) continue;
+    const existing = unique.get(key);
+    if (!existing) {
+      unique.set(key, employee);
+      continue;
+    }
+    // Предпочитаем активную/более полную запись, но не создаём дубли одного имени.
+    const existingScore = (existing.is_active !== false ? 4 : 0) + (existing.role ? 2 : 0) + (existing.color ? 1 : 0);
+    const nextScore = (employee.is_active !== false ? 4 : 0) + (employee.role ? 2 : 0) + (employee.color ? 1 : 0);
+    if (nextScore > existingScore) unique.set(key, employee);
+  }
+  return Array.from(unique.values());
+}
+
 function normalizeProject(project, index = 0) {
   return {
     id: project.id || `local-project-${Date.now()}-${index}`,
@@ -897,13 +917,13 @@ export default function App() {
 
   async function loadAccessEmployees() {
     if (!supabase) {
-      const local = parseLocal(EMPLOYEES_STORAGE_KEY, DEFAULT_EMPLOYEES).map(normalizeEmployee).filter((item) => item.is_active !== false);
+      const local = dedupeEmployeesByName(parseLocal(EMPLOYEES_STORAGE_KEY, DEFAULT_EMPLOYEES)).filter((item) => item.is_active !== false);
       setAccessEmployees(local);
       return local;
     }
     const { data, error } = await supabase.rpc('list_app_employees');
     if (error) throw error;
-    const directory = (data || []).map(normalizeEmployee);
+    const directory = dedupeEmployeesByName(data || []);
     setAccessEmployees(directory);
     return directory;
   }
@@ -968,7 +988,7 @@ export default function App() {
     setLoading(true);
     setMessage('');
 
-    const localEmployees = parseLocal(EMPLOYEES_STORAGE_KEY, DEFAULT_EMPLOYEES).map(normalizeEmployee);
+    const localEmployees = dedupeEmployeesByName(parseLocal(EMPLOYEES_STORAGE_KEY, DEFAULT_EMPLOYEES));
     const localProjects = parseLocal(PROJECTS_STORAGE_KEY, supabase ? [] : SAMPLE_PROJECTS).map(normalizeProject);
     const localStages = parseLocal(STAGES_STORAGE_KEY, supabase ? [] : SAMPLE_STAGES).map(normalizeStage);
     const localSections = parseLocal(SECTIONS_STORAGE_KEY, []).map(normalizeSection);
@@ -1006,7 +1026,7 @@ export default function App() {
       ]);
 
       if (tasksResult.error) throw tasksResult.error;
-      const loadedEmployees = employeesResult.error || !employeesResult.data?.length ? localEmployees : employeesResult.data.map(normalizeEmployee);
+      const loadedEmployees = dedupeEmployeesByName(employeesResult.error || !employeesResult.data?.length ? localEmployees : employeesResult.data);
       const loadedProjects = projectsResult.error ? localProjects : (projectsResult.data || []).map(normalizeProject);
       const loadedStages = stagesResult.error ? localStages : (stagesResult.data || []).map(normalizeStage);
       const loadedSections = sectionsResult.error ? localSections : (sectionsResult.data || []).map(normalizeSection);
@@ -1014,13 +1034,14 @@ export default function App() {
       const loadedReschedules = reschedulesResult.error ? localReschedules : (reschedulesResult.data || []).map(normalizeReschedule);
       const loadedTemplates = templatesResult.error ? fallbackTemplates : [...BUILTIN_TEMPLATES, ...(templatesResult.data || []).map(normalizeTemplate)];
 
-      const employeeMap = new Map(loadedEmployees.map((employee) => [employee.name.toLowerCase(), employee]));
+      const employeeMap = new Map(loadedEmployees.map((employee) => [String(employee.name || '').trim().toLowerCase(), employee]));
       loadedTasks.forEach((task, index) => {
-        if (!employeeMap.has(task.owner.toLowerCase())) {
-          const employee = normalizeEmployee({ name: task.owner, role: 'Сотрудник' }, loadedEmployees.length + index);
-          loadedEmployees.push(employee);
-          employeeMap.set(employee.name.toLowerCase(), employee);
-        }
+        const ownerName = String(task.owner || '').trim();
+        const ownerKey = ownerName.toLowerCase();
+        if (!ownerKey || employeeMap.has(ownerKey)) return;
+        const employee = normalizeEmployee({ name: ownerName, role: 'Сотрудник' }, loadedEmployees.length + index);
+        loadedEmployees.push(employee);
+        employeeMap.set(ownerKey, employee);
       });
 
       setEmployees(loadedEmployees);
@@ -1294,7 +1315,7 @@ export default function App() {
     carryovers: currentWeekCarryovers.length,
   }), [activeProjects, workingTasks, currentWeekCarryovers]);
 
-  const workload = useMemo(() => employees.filter((employee) => employee.is_active !== false).map((employee) => {
+  const workload = useMemo(() => dedupeEmployeesByName(employees).filter((employee) => employee.is_active !== false).map((employee) => {
     const personTasks = workingTasks.filter((task) => task.owner === employee.name && !isTaskCompleted(task));
     const capacity = Math.max(1, Number(employee.task_capacity || 10));
     const active = personTasks.length;
@@ -2372,7 +2393,7 @@ export default function App() {
           <div className="flex flex-col gap-6 xl:flex-row xl:items-center xl:justify-between">
             <div className="max-w-3xl">
               <div className="mb-3 inline-flex items-center rounded-full bg-white/10 px-3 py-1 text-xs font-medium text-violet-100 ring-1 ring-white/10">
-                <Sparkles className="mr-2 h-3.5 w-3.5" /> MAVIS GROUP · центр проектов · версия 6.2.4
+                <Sparkles className="mr-2 h-3.5 w-3.5" /> MAVIS GROUP · центр проектов · версия 6.2.5
               </div>
               <h1 className="text-3xl font-bold tracking-tight md:text-4xl">Разделы → проекты → этапы → задачи</h1>
               <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-300 md:text-base">Собирайте проекты по направлениям, управляйте стадиями и показывайте только нужные статусы задач без потери общей истории.</p>
