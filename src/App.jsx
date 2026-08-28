@@ -329,8 +329,8 @@ function normalizeTask(task) {
   return {
     id: task.id || `local-task-${Date.now()}-${Math.random().toString(16).slice(2)}`,
     title: String(task.title || 'Без названия').trim(),
-    owner: normalizeOwner(task.owner),
-    deadline: task.deadline || todayIso(),
+    owner: String(task.owner || '').trim(),
+    deadline: task.deadline || '',
     period: ['day', 'week', 'month'].includes(task.period) ? task.period : 'day',
     status: TASK_STATUSES.includes(task.status) ? task.status : 'Новая',
     priority: PRIORITIES.includes(task.priority) ? task.priority : 'Средний',
@@ -346,6 +346,8 @@ function normalizeTask(task) {
     section_id: task.section_id || null,
     backlog: Boolean(task.backlog),
     backlog_at: task.backlog_at || '',
+    actual_hours: task.actual_hours == null || task.actual_hours === '' ? null : Number(task.actual_hours),
+    completed_at: task.completed_at || '',
     created_at: task.created_at || new Date().toISOString(),
   };
 }
@@ -509,6 +511,7 @@ function emptyTaskForm(selectedDate, owner, projectId = '', stageId = '') {
     status: 'Ожидает',
     priority: 'Средний',
     hours: 1,
+    actual_hours: '',
     start_time: '09:00',
     end_time: '10:00',
     block: '',
@@ -719,7 +722,7 @@ function WeekCalendar({ tasks, unscheduledTasks, selectedDate, onEditTask, onMov
                   className={`group w-full rounded-2xl border bg-white p-3 text-left shadow-sm transition hover:-translate-y-0.5 hover:shadow-md ${String(draggedTaskId) === String(task.id) ? 'opacity-45' : ''}`}
                   style={{ borderLeft: `5px solid ${task.color}` }}
                 >
-                  <div className="flex items-start gap-2"><GripVertical className="mt-0.5 h-4 w-4 shrink-0 text-slate-300 group-hover:text-slate-500" /><div className="min-w-0"><p className="line-clamp-2 text-sm font-semibold text-slate-800">{task.title}</p><p className="mt-1 text-xs text-slate-500">{task.owner} · срок {formatDate(task.deadline)}</p></div></div>
+                  <div className="flex items-start gap-2"><GripVertical className="mt-0.5 h-4 w-4 shrink-0 text-slate-300 group-hover:text-slate-500" /><div className="min-w-0"><p className="line-clamp-2 text-sm font-semibold text-slate-800">{task.title}</p><p className="mt-1 text-xs text-slate-500">{task.owner || 'Без ответственного'} · срок {formatDate(task.deadline)}</p></div></div>
                 </button>
               ))}
               {unscheduledTasks.length === 0 && <div className="rounded-2xl border border-dashed p-5 text-center text-sm text-slate-500">Все задачи уже распределены по времени.</div>}
@@ -794,7 +797,7 @@ function WeekCalendar({ tasks, unscheduledTasks, selectedDate, onEditTask, onMov
                           onClick={() => onEditTask(task)}
                           className={`absolute left-1 right-1 z-10 overflow-hidden rounded-lg p-1.5 text-left text-[11px] font-semibold leading-tight text-white shadow-sm transition hover:brightness-105 ${String(draggedTaskId) === String(task.id) ? 'opacity-40' : ''}`}
                           style={{ top, height, backgroundColor: task.color }}
-                          title={`${task.title}\n${task.owner}\n${formatTime(task.start_time)}–${formatTime(task.end_time)}`}
+                          title={`${task.title}\n${task.owner || 'Без ответственного'}\n${formatTime(task.start_time)}–${formatTime(task.end_time)}`}
                         >
                           <span className="flex items-start gap-1"><GripVertical className="mt-0.5 h-3 w-3 shrink-0 opacity-75" /><span>{formatTime(task.start_time)} · {task.title}</span></span>
                         </button>
@@ -867,6 +870,9 @@ export default function App() {
   const [templateLaunchForm, setTemplateLaunchForm] = useState({ name: '', section_id: '', owner: 'Саша', customer: '', start_date: todayIso() });
   const [bulkForm, setBulkForm] = useState({ owner: '', status: '', priority: '', deadline: '' });
   const [deadlineChange, setDeadlineChange] = useState({ changed_by: 'Саша', reason: '' });
+  const [completionTaskId, setCompletionTaskId] = useState(null);
+  const [completionHours, setCompletionHours] = useState('');
+  const [completionError, setCompletionError] = useState('');
 
   const employeeNames = useMemo(() => employees.filter((employee) => employee.is_active !== false).map((employee) => employee.name), [employees]);
   const isAdmin = Boolean(currentUser?.is_admin);
@@ -1160,7 +1166,7 @@ export default function App() {
       const matchesFilter = taskFilter === 'all'
         || (taskFilter === 'active' && !isTaskCompleted(task))
         || (taskFilter === 'today' && task.deadline === todayIso())
-        || (taskFilter === 'overdue' && task.deadline < todayIso() && !isTaskCompleted(task));
+        || (taskFilter === 'overdue' && task.deadline && task.deadline < todayIso() && !isTaskCompleted(task));
       const matchesStatus = statusFilter === 'all'
         || (statusFilter === 'active' && !isTaskCompleted(task))
         || (statusFilter === 'completed' && isTaskCompleted(task))
@@ -1284,7 +1290,7 @@ export default function App() {
     tasks: workingTasks.length,
     active: workingTasks.filter((task) => !isTaskCompleted(task)).length,
     done: workingTasks.filter((task) => isTaskCompleted(task)).length,
-    overdue: workingTasks.filter((task) => task.deadline < todayIso() && !isTaskCompleted(task)).length,
+    overdue: workingTasks.filter((task) => task.deadline && task.deadline < todayIso() && !isTaskCompleted(task)).length,
     carryovers: currentWeekCarryovers.length,
   }), [activeProjects, workingTasks, currentWeekCarryovers]);
 
@@ -1297,7 +1303,7 @@ export default function App() {
       name: employee.name,
       tasks: active,
       capacity,
-      overdue: personTasks.filter((task) => task.deadline < todayIso()).length,
+      overdue: personTasks.filter((task) => task.deadline && task.deadline < todayIso()).length,
       overload: Math.max(0, active - capacity),
       ratio,
       color: ratio > 1.25 ? '#ef4444' : ratio > 1 ? '#f59e0b' : employee.color,
@@ -1386,6 +1392,7 @@ export default function App() {
         status: task.status,
         priority: task.priority,
         hours: task.hours,
+        actual_hours: task.actual_hours ?? '',
         start_time: task.start_time || '',
         end_time: task.end_time || '',
         block: task.block || '',
@@ -1726,14 +1733,23 @@ export default function App() {
     }
 
     const calculatedHours = hoursBetween(taskForm.start_time, taskForm.end_time);
+    const previousTaskForSave = editingTaskId ? taskById.get(String(editingTaskId)) : null;
+    const closingFromForm = isTaskCompleted(taskForm.status);
+    const actualHoursFromForm = Number(taskForm.actual_hours);
+    if (closingFromForm && (!Number.isFinite(actualHoursFromForm) || actualHoursFromForm <= 0)) {
+      setMessage('Чтобы закрыть задачу, обязательно укажите фактически потраченное время.');
+      return;
+    }
     const payload = {
       title: taskForm.title.trim(),
-      owner: taskForm.owner,
-      deadline: taskForm.deadline,
+      owner: taskForm.owner || null,
+      deadline: taskForm.deadline || null,
       period: taskForm.period,
       status: taskForm.status,
       priority: taskForm.priority,
       hours: Number(taskForm.hours || calculatedHours || 1),
+      actual_hours: closingFromForm ? actualHoursFromForm : (previousTaskForSave?.actual_hours ?? null),
+      completed_at: closingFromForm ? (previousTaskForSave?.completed_at || new Date().toISOString()) : null,
       start_time: taskForm.start_time || null,
       end_time: taskForm.end_time || null,
       block: taskForm.block.trim(),
@@ -1843,17 +1859,51 @@ export default function App() {
     setActiveTab('tasks');
   }
 
-  async function updateTaskStatus(taskId, status) {
+  async function persistTaskStatus(taskId, status, extra = {}) {
     const previous = tasks;
-    setTasks((items) => items.map((task) => String(task.id) === String(taskId) ? { ...task, status } : task));
+    const patch = { status, ...extra };
+    setTasks((items) => items.map((task) => String(task.id) === String(taskId) ? { ...task, ...patch } : task));
     try {
       if (supabase && isRemoteId(taskId)) {
-        const { error } = await supabase.from('tasks').update({ status }).eq('id', taskId);
+        const { error } = await supabase.from('tasks').update(patch).eq('id', taskId);
         if (error) throw error;
       }
+      return true;
     } catch (error) {
       setTasks(previous);
       setMessage(`Не удалось изменить статус: ${error.message}`);
+      return false;
+    }
+  }
+
+  async function updateTaskStatus(taskId, status) {
+    const task = taskById.get(String(taskId));
+    if (!task) return;
+    if (isTaskCompleted(status) && !isTaskCompleted(task.status)) {
+      setCompletionTaskId(taskId);
+      setCompletionHours(task.actual_hours ?? '');
+      setCompletionError('');
+      return;
+    }
+    const extra = !isTaskCompleted(status) ? { completed_at: null } : {};
+    await persistTaskStatus(taskId, status, extra);
+  }
+
+  async function confirmTaskCompletion() {
+    const actualHours = Number(completionHours);
+    if (!Number.isFinite(actualHours) || actualHours <= 0) {
+      setCompletionError('Укажите фактически потраченное время больше 0 часов.');
+      return;
+    }
+    const ok = await persistTaskStatus(completionTaskId, 'Готово', {
+      actual_hours: actualHours,
+      completed_at: new Date().toISOString(),
+    });
+    if (ok) {
+      setCompletionTaskId(null);
+      setCompletionHours('');
+      setCompletionError('');
+      setMessage(`Задача закрыта. Фактическое время: ${actualHours} ч.`);
     }
   }
 
@@ -2111,6 +2161,7 @@ export default function App() {
     if (!selectedTaskIds.length) return setMessage('Выберите задачи.');
     const payload = Object.fromEntries(Object.entries(bulkForm).filter(([, value]) => value));
     if (!Object.keys(payload).length) return setMessage('Выберите хотя бы одно массовое изменение.');
+    if (isTaskCompleted(payload.status)) return setMessage('Завершать задачи массово нельзя: для каждой закрываемой задачи нужно отдельно указать фактически потраченное время.');
     const previous = tasks;
     setTasks((items) => items.map((task) => selectedTaskIds.includes(String(task.id)) ? { ...task, ...payload } : task));
     try {
@@ -2249,9 +2300,9 @@ export default function App() {
                       <div className="border-t bg-white">
                         {stageTasks.map((task) => (
                           <div key={task.id} className="grid gap-2 border-b px-3 py-3 last:border-b-0 lg:grid-cols-[minmax(240px,2fr)_120px_130px_145px_minmax(170px,1fr)_80px] lg:items-center">
-                            <div><div className="flex flex-wrap items-center gap-2"><b className="text-sm">{task.title}</b><span className={`rounded-full px-2 py-0.5 text-[11px] ${priorityStyle(task.priority)}`}>{task.priority}</span>{task.deadline < todayIso() && !isTaskCompleted(task) && <span className="rounded-full bg-rose-100 px-2 py-0.5 text-[11px] text-rose-700">Просрочено</span>}</div>{task.result && <p className="mt-1 text-xs text-slate-500">Результат: {task.result}</p>}</div>
+                            <div><div className="flex flex-wrap items-center gap-2"><b className="text-sm">{task.title}</b><span className={`rounded-full px-2 py-0.5 text-[11px] ${priorityStyle(task.priority)}`}>{task.priority}</span>{task.deadline && task.deadline < todayIso() && !isTaskCompleted(task) && <span className="rounded-full bg-rose-100 px-2 py-0.5 text-[11px] text-rose-700">Просрочено</span>}</div>{task.result && <p className="mt-1 text-xs text-slate-500">Результат: {task.result}</p>}</div>
                             <span className="text-sm">{formatDate(task.deadline)}</span>
-                            <span className="text-sm font-medium">{task.owner}</span>
+                            <span className="text-sm font-medium">{task.owner || 'Без ответственного'}</span>
                             <select value={task.status} onChange={(event) => updateTaskStatus(task.id, event.target.value)} className={`rounded-xl border-0 px-2 py-1.5 text-sm ${statusStyle(task.status)}`}>{TASK_STATUSES.map((status) => <option key={status}>{status}</option>)}</select>
                             <div className="min-w-0 text-sm text-slate-600"><span className="line-clamp-2">{task.comment || '—'}</span><TaskResourceLink url={task.resource_url} compact /></div>
                             <span className="flex gap-1"><button type="button" onClick={() => setTaskBacklog(task, true)} className="rounded-lg bg-amber-50 p-2 text-amber-800" title="В бэклог"><Inbox className="h-4 w-4" /></button><button type="button" onClick={() => openTaskModal(task)} className="rounded-lg bg-violet-50 p-2 text-violet-700"><Edit3 className="h-4 w-4" /></button></span>
@@ -2267,7 +2318,7 @@ export default function App() {
               {tasksWithoutStage.length > 0 && (
                 <div className="overflow-hidden rounded-xl border border-dashed border-amber-200 bg-amber-50/40">
                   <div className="px-3 py-2 text-sm font-semibold text-amber-900">Задачи проекта без этапа</div>
-                  {tasksWithoutStage.map((task) => <button key={task.id} type="button" onClick={() => openTaskModal(task)} className="flex w-full items-center justify-between border-t bg-white px-3 py-2 text-left text-sm hover:bg-slate-50"><span><b>{task.title}</b><span className="ml-2 text-xs text-slate-500">{task.owner} · {formatDate(task.deadline)}</span></span><span className={`rounded-full px-2 py-0.5 text-[11px] ${statusStyle(task.status)}`}>{task.status}</span></button>)}
+                  {tasksWithoutStage.map((task) => <button key={task.id} type="button" onClick={() => openTaskModal(task)} className="flex w-full items-center justify-between border-t bg-white px-3 py-2 text-left text-sm hover:bg-slate-50"><span><b>{task.title}</b><span className="ml-2 text-xs text-slate-500">{task.owner || 'Без ответственного'} · {formatDate(task.deadline)}</span></span><span className={`rounded-full px-2 py-0.5 text-[11px] ${statusStyle(task.status)}`}>{task.status}</span></button>)}
                 </div>
               )}
 
@@ -2321,7 +2372,7 @@ export default function App() {
           <div className="flex flex-col gap-6 xl:flex-row xl:items-center xl:justify-between">
             <div className="max-w-3xl">
               <div className="mb-3 inline-flex items-center rounded-full bg-white/10 px-3 py-1 text-xs font-medium text-violet-100 ring-1 ring-white/10">
-                <Sparkles className="mr-2 h-3.5 w-3.5" /> MAVIS GROUP · центр проектов · версия 6.2.3
+                <Sparkles className="mr-2 h-3.5 w-3.5" /> MAVIS GROUP · центр проектов · версия 6.2.4
               </div>
               <h1 className="text-3xl font-bold tracking-tight md:text-4xl">Разделы → проекты → этапы → задачи</h1>
               <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-300 md:text-base">Собирайте проекты по направлениям, управляйте стадиями и показывайте только нужные статусы задач без потери общей истории.</p>
@@ -2534,9 +2585,9 @@ export default function App() {
                                   </div>
                                   {stageTasks.map((task) => (
                                     <div key={task.id} className="grid gap-3 border-b px-4 py-3 last:border-b-0 lg:grid-cols-[minmax(260px,2fr)_130px_135px_150px_minmax(180px,1fr)_110px] lg:items-center">
-                                      <div><div className="flex flex-wrap items-center gap-2"><b className="text-sm">{task.title}</b><span className={`rounded-full px-2 py-0.5 text-[11px] ${priorityStyle(task.priority)}`}>{task.priority}</span>{task.deadline < todayIso() && task.status !== 'Готово' && <span className="rounded-full bg-rose-100 px-2 py-0.5 text-[11px] text-rose-700">Просрочено</span>}</div>{task.result && <p className="mt-1 text-xs text-slate-500">Результат: {task.result}</p>}</div>
+                                      <div><div className="flex flex-wrap items-center gap-2"><b className="text-sm">{task.title}</b><span className={`rounded-full px-2 py-0.5 text-[11px] ${priorityStyle(task.priority)}`}>{task.priority}</span>{task.deadline && task.deadline < todayIso() && task.status !== 'Готово' && <span className="rounded-full bg-rose-100 px-2 py-0.5 text-[11px] text-rose-700">Просрочено</span>}</div>{task.result && <p className="mt-1 text-xs text-slate-500">Результат: {task.result}</p>}</div>
                                       <span className="text-sm">{formatDate(task.deadline)}</span>
-                                      <span className="text-sm font-medium">{task.owner}</span>
+                                      <span className="text-sm font-medium">{task.owner || 'Без ответственного'}</span>
                                       <select value={task.status} onChange={(event) => updateTaskStatus(task.id, event.target.value)} className={`rounded-xl border-0 px-2.5 py-2 text-sm ${statusStyle(task.status)}`}>{TASK_STATUSES.map((status) => <option key={status}>{status}</option>)}</select>
                                       <div className="min-w-0 text-sm text-slate-600"><span className="block">{task.comment || '—'}</span><TaskResourceLink url={task.resource_url} compact /></div>
                                       <span className="flex gap-1"><button type="button" onClick={() => setTaskBacklog(task, true)} className="rounded-lg bg-amber-50 p-2 text-amber-800 hover:bg-amber-100" title="В бэклог"><Inbox className="h-4 w-4" /></button><button type="button" onClick={() => openTaskModal(task)} className="rounded-lg bg-violet-50 p-2 text-violet-700 hover:bg-violet-100"><Edit3 className="h-4 w-4" /></button><button type="button" onClick={() => deleteTask(task)} className="rounded-lg bg-rose-50 p-2 text-rose-600 hover:bg-rose-100"><Trash2 className="h-4 w-4" /></button></span>
@@ -2564,9 +2615,9 @@ export default function App() {
                               </div>
                               {directProjectTasks.map((task) => (
                                 <div key={task.id} className="grid gap-3 border-b px-4 py-3 last:border-b-0 lg:grid-cols-[minmax(260px,2fr)_130px_135px_150px_minmax(180px,1fr)_110px] lg:items-center">
-                                  <div><div className="flex flex-wrap items-center gap-2"><b className="text-sm">{task.title}</b><span className={`rounded-full px-2 py-0.5 text-[11px] ${priorityStyle(task.priority)}`}>{task.priority}</span>{task.deadline < todayIso() && !isTaskCompleted(task) && <span className="rounded-full bg-rose-100 px-2 py-0.5 text-[11px] text-rose-700">Просрочено</span>}</div>{task.result && <p className="mt-1 text-xs text-slate-500">Результат: {task.result}</p>}</div>
+                                  <div><div className="flex flex-wrap items-center gap-2"><b className="text-sm">{task.title}</b><span className={`rounded-full px-2 py-0.5 text-[11px] ${priorityStyle(task.priority)}`}>{task.priority}</span>{task.deadline && task.deadline < todayIso() && !isTaskCompleted(task) && <span className="rounded-full bg-rose-100 px-2 py-0.5 text-[11px] text-rose-700">Просрочено</span>}</div>{task.result && <p className="mt-1 text-xs text-slate-500">Результат: {task.result}</p>}</div>
                                   <span className="text-sm">{formatDate(task.deadline)}</span>
-                                  <span className="text-sm font-medium">{task.owner}</span>
+                                  <span className="text-sm font-medium">{task.owner || 'Без ответственного'}</span>
                                   <select value={task.status} onChange={(event) => updateTaskStatus(task.id, event.target.value)} className={`rounded-xl border-0 px-2.5 py-2 text-sm ${statusStyle(task.status)}`}>{TASK_STATUSES.map((status) => <option key={status}>{status}</option>)}</select>
                                   <div className="min-w-0 text-sm text-slate-600"><span className="block">{task.comment || '—'}</span><TaskResourceLink url={task.resource_url} compact /></div>
                                   <span className="flex gap-1"><button type="button" onClick={() => setTaskBacklog(task, true)} className="rounded-lg bg-amber-50 p-2 text-amber-800 hover:bg-amber-100" title="В бэклог"><Inbox className="h-4 w-4" /></button><button type="button" onClick={() => openTaskModal(task)} className="rounded-lg bg-violet-50 p-2 text-violet-700 hover:bg-violet-100"><Edit3 className="h-4 w-4" /></button><button type="button" onClick={() => deleteTask(task)} className="rounded-lg bg-rose-50 p-2 text-rose-600 hover:bg-rose-100"><Trash2 className="h-4 w-4" /></button></span>
@@ -2588,7 +2639,7 @@ export default function App() {
 
             {filteredTasks.filter((task) => !task.project_id && !task.section_id).length > 0 && (
               <Card>
-                <div className="p-5"><h3 className="text-lg font-semibold">Задачи без проекта и раздела</h3><p className="text-sm text-slate-500">Их можно открыть и привязать к проекту, этапу или разделу.</p><div className="mt-4 space-y-2">{filteredTasks.filter((task) => !task.project_id && !task.section_id).map((task) => <button key={task.id} type="button" onClick={() => openTaskModal(task)} className="flex w-full items-center justify-between rounded-xl border p-3 text-left hover:border-violet-200"><span><b>{task.title}</b><span className="mt-1 block text-xs text-slate-500">{task.owner} · {formatDate(task.deadline)}</span></span><span className={`rounded-full px-3 py-1 text-xs ${statusStyle(task.status)}`}>{task.status}</span></button>)}</div></div>
+                <div className="p-5"><h3 className="text-lg font-semibold">Задачи без проекта и раздела</h3><p className="text-sm text-slate-500">Их можно открыть и привязать к проекту, этапу или разделу.</p><div className="mt-4 space-y-2">{filteredTasks.filter((task) => !task.project_id && !task.section_id).map((task) => <button key={task.id} type="button" onClick={() => openTaskModal(task)} className="flex w-full items-center justify-between rounded-xl border p-3 text-left hover:border-violet-200"><span><b>{task.title}</b><span className="mt-1 block text-xs text-slate-500">{task.owner || 'Без ответственного'} · {formatDate(task.deadline)}</span></span><span className={`rounded-full px-3 py-1 text-xs ${statusStyle(task.status)}`}>{task.status}</span></button>)}</div></div>
               </Card>
             )}
           </div>
@@ -2642,7 +2693,7 @@ export default function App() {
                         {visibleDirectTasks.length > 0 && (
                           <div className="rounded-2xl border border-dashed border-cyan-200 bg-cyan-50/40 p-4">
                             <div className="mb-3 flex items-center justify-between"><div><b>Отдельные задачи без проекта</b><p className="text-xs text-slate-500">Сохранены для совместимости. Для новых крупных работ лучше создавать проект.</p></div><button type="button" onClick={() => openTaskModal(null, '', '', section.id)} className="rounded-xl bg-violet-600 px-3 py-2 text-xs font-medium text-white">+ Задача</button></div>
-                            <div className="space-y-2">{visibleDirectTasks.map((task) => <button key={task.id} type="button" onClick={() => openTaskModal(task)} className="flex w-full items-center justify-between rounded-xl border bg-white p-3 text-left hover:border-violet-200"><span><b>{task.title}</b><span className="mt-1 block text-xs text-slate-500">{task.owner} · {formatDate(task.deadline)}</span></span><span className={`rounded-full px-2 py-0.5 text-[11px] ${statusStyle(task.status)}`}>{task.status}</span></button>)}</div>
+                            <div className="space-y-2">{visibleDirectTasks.map((task) => <button key={task.id} type="button" onClick={() => openTaskModal(task)} className="flex w-full items-center justify-between rounded-xl border bg-white p-3 text-left hover:border-violet-200"><span><b>{task.title}</b><span className="mt-1 block text-xs text-slate-500">{task.owner || 'Без ответственного'} · {formatDate(task.deadline)}</span></span><span className={`rounded-full px-2 py-0.5 text-[11px] ${statusStyle(task.status)}`}>{task.status}</span></button>)}</div>
                           </div>
                         )}
                       </div>
@@ -2692,7 +2743,7 @@ export default function App() {
               <div className="space-y-3">{filteredTasks.map((task) => {
                 const project = projectById.get(String(task.project_id));
                 const stage = stageById.get(String(task.stage_id));
-                return <div key={task.id} className={`rounded-2xl border bg-white p-4 hover:border-violet-200 hover:shadow-sm ${selectedTaskIds.includes(String(task.id)) ? 'ring-2 ring-violet-300' : ''}`}><div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between"><div className="flex min-w-0 gap-3"><input type="checkbox" checked={selectedTaskIds.includes(String(task.id))} onChange={(event) => setSelectedTaskIds((items) => event.target.checked ? [...new Set([...items, String(task.id)])] : items.filter((id) => id !== String(task.id)))} className="mt-1 h-4 w-4 accent-violet-600" /><div className="space-y-2"><div className="flex flex-wrap gap-2"><span className={`rounded-full px-3 py-1 text-xs ${statusStyle(task.status)}`}>{task.status}</span><span className={`rounded-full px-3 py-1 text-xs ${priorityStyle(task.priority)}`}>{task.priority}</span>{project && <span className="rounded-full bg-violet-50 px-3 py-1 text-xs text-violet-700">{project.name}</span>}{stage && <span className="rounded-full bg-sky-50 px-3 py-1 text-xs text-sky-700">{stage.title}</span>}{sectionById.get(String(project?.section_id || task.section_id)) && <span className="rounded-full bg-cyan-50 px-3 py-1 text-xs text-cyan-700">{sectionById.get(String(project?.section_id || task.section_id)).name}</span>}</div><h3 className="text-lg font-semibold">{task.title}</h3><p className="text-sm text-slate-600"><b>Комментарий:</b> {task.comment || '—'}</p>{task.resource_url && <TaskResourceLink url={task.resource_url} />}<p className="text-sm text-slate-500">{task.owner} · {formatDate(task.deadline)} · {formatTime(task.start_time)}{task.end_time ? `–${formatTime(task.end_time)}` : ''} · {task.hours} ч</p></div></div><div className="flex flex-wrap gap-2"><select value={task.status} onChange={(event) => updateTaskStatus(task.id, event.target.value)} className={`rounded-xl border-0 px-3 py-2 text-sm ${statusStyle(task.status)}`}>{TASK_STATUSES.map((status) => <option key={status}>{status}</option>)}</select><button type="button" onClick={() => setTaskBacklog(task, true)} className="inline-flex items-center rounded-xl bg-amber-50 px-3 py-2 text-sm font-medium text-amber-800"><Inbox className="mr-2 h-4 w-4" />В бэклог</button><button type="button" onClick={() => openTaskModal(task)} className="inline-flex items-center rounded-xl bg-violet-50 px-3 py-2 text-sm font-medium text-violet-700"><Edit3 className="mr-2 h-4 w-4" />Изменить</button><button type="button" onClick={() => deleteTask(task)} className="rounded-xl border border-rose-100 px-3 py-2 text-rose-600"><Trash2 className="h-4 w-4" /></button></div></div></div>;
+                return <div key={task.id} className={`rounded-2xl border bg-white p-4 hover:border-violet-200 hover:shadow-sm ${selectedTaskIds.includes(String(task.id)) ? 'ring-2 ring-violet-300' : ''}`}><div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between"><div className="flex min-w-0 gap-3"><input type="checkbox" checked={selectedTaskIds.includes(String(task.id))} onChange={(event) => setSelectedTaskIds((items) => event.target.checked ? [...new Set([...items, String(task.id)])] : items.filter((id) => id !== String(task.id)))} className="mt-1 h-4 w-4 accent-violet-600" /><div className="space-y-2"><div className="flex flex-wrap gap-2"><span className={`rounded-full px-3 py-1 text-xs ${statusStyle(task.status)}`}>{task.status}</span><span className={`rounded-full px-3 py-1 text-xs ${priorityStyle(task.priority)}`}>{task.priority}</span>{project && <span className="rounded-full bg-violet-50 px-3 py-1 text-xs text-violet-700">{project.name}</span>}{stage && <span className="rounded-full bg-sky-50 px-3 py-1 text-xs text-sky-700">{stage.title}</span>}{sectionById.get(String(project?.section_id || task.section_id)) && <span className="rounded-full bg-cyan-50 px-3 py-1 text-xs text-cyan-700">{sectionById.get(String(project?.section_id || task.section_id)).name}</span>}</div><h3 className="text-lg font-semibold">{task.title}</h3><p className="text-sm text-slate-600"><b>Комментарий:</b> {task.comment || '—'}</p>{task.resource_url && <TaskResourceLink url={task.resource_url} />}<p className="text-sm text-slate-500">{task.owner || 'Без ответственного'} · {formatDate(task.deadline)} · {formatTime(task.start_time)}{task.end_time ? `–${formatTime(task.end_time)}` : ''} · план {task.hours} ч{task.actual_hours ? ` · факт ${task.actual_hours} ч` : ''}</p></div></div><div className="flex flex-wrap gap-2"><select value={task.status} onChange={(event) => updateTaskStatus(task.id, event.target.value)} className={`rounded-xl border-0 px-3 py-2 text-sm ${statusStyle(task.status)}`}>{TASK_STATUSES.map((status) => <option key={status}>{status}</option>)}</select><button type="button" onClick={() => setTaskBacklog(task, true)} className="inline-flex items-center rounded-xl bg-amber-50 px-3 py-2 text-sm font-medium text-amber-800"><Inbox className="mr-2 h-4 w-4" />В бэклог</button><button type="button" onClick={() => openTaskModal(task)} className="inline-flex items-center rounded-xl bg-violet-50 px-3 py-2 text-sm font-medium text-violet-700"><Edit3 className="mr-2 h-4 w-4" />Изменить</button><button type="button" onClick={() => deleteTask(task)} className="rounded-xl border border-rose-100 px-3 py-2 text-rose-600"><Trash2 className="h-4 w-4" /></button></div></div></div>;
               })}{filteredTasks.length === 0 && <div className="rounded-2xl border border-dashed p-8 text-center text-slate-500">По выбранным фильтрам задач нет.</div>}</div>
             </div>
           </Card>
@@ -2731,7 +2782,7 @@ export default function App() {
                     {filteredBacklogTasks.map((task) => {
                       const project = projectById.get(String(task.project_id));
                       const stage = stageById.get(String(task.stage_id));
-                      return <div key={task.id} className="rounded-2xl border bg-white p-4"><div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between"><div className="min-w-0"><div className="flex flex-wrap gap-2"><span className={`rounded-full px-2.5 py-1 text-xs ${statusStyle(task.status)}`}>{task.status}</span><span className={`rounded-full px-2.5 py-1 text-xs ${priorityStyle(task.priority)}`}>{task.priority}</span></div><b className="mt-2 block">{task.title}</b><p className="mt-1 text-sm text-slate-500">{project?.name || 'Без проекта'}{stage ? ` · ${stage.title}` : ''} · {task.owner} · {formatDate(task.deadline)}</p>{task.comment && <p className="mt-2 text-sm text-slate-600">{task.comment}</p>}</div><div className="flex shrink-0 gap-2"><button type="button" onClick={() => setTaskBacklog(task, false)} className="inline-flex items-center rounded-xl bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-100"><Undo2 className="mr-2 h-4 w-4" />Вернуть</button><button type="button" onClick={() => openTaskModal(task)} className="rounded-xl bg-violet-50 p-2 text-violet-700" title="Редактировать"><Edit3 className="h-4 w-4" /></button></div></div></div>;
+                      return <div key={task.id} className="rounded-2xl border bg-white p-4"><div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between"><div className="min-w-0"><div className="flex flex-wrap gap-2"><span className={`rounded-full px-2.5 py-1 text-xs ${statusStyle(task.status)}`}>{task.status}</span><span className={`rounded-full px-2.5 py-1 text-xs ${priorityStyle(task.priority)}`}>{task.priority}</span></div><b className="mt-2 block">{task.title}</b><p className="mt-1 text-sm text-slate-500">{project?.name || 'Без проекта'}{stage ? ` · ${stage.title}` : ''} · {task.owner || 'Без ответственного'} · {formatDate(task.deadline)}</p>{task.comment && <p className="mt-2 text-sm text-slate-600">{task.comment}</p>}</div><div className="flex shrink-0 gap-2"><button type="button" onClick={() => setTaskBacklog(task, false)} className="inline-flex items-center rounded-xl bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-100"><Undo2 className="mr-2 h-4 w-4" />Вернуть</button><button type="button" onClick={() => openTaskModal(task)} className="rounded-xl bg-violet-50 p-2 text-violet-700" title="Редактировать"><Edit3 className="h-4 w-4" /></button></div></div></div>;
                     })}
                     {filteredBacklogTasks.length === 0 && <div className="rounded-2xl border border-dashed p-8 text-center text-slate-500">Отдельных задач в бэклоге пока нет.</div>}
                   </div>
@@ -2795,7 +2846,7 @@ export default function App() {
 
         {activeTab === 'team' && (
           <div className="grid gap-5 xl:grid-cols-[1.1fr_1fr]">
-            <Card><div className="p-5"><div className="mb-5 flex items-center justify-between"><div><h2 className="text-xl font-semibold">Команда</h2><p className="text-sm text-slate-500">Карточка подсвечивается, когда активных задач больше установленной нормы.</p></div>{isAdmin && <button type="button" onClick={() => openEmployeeModal()} className="inline-flex items-center rounded-xl bg-sky-600 px-4 py-2 text-sm font-medium text-white"><UserPlus className="mr-2 h-4 w-4" />Добавить</button>}</div><div className="grid gap-3 sm:grid-cols-2">{employees.map((employee) => { const allPersonTasks = workingTasks.filter((task) => task.owner === employee.name); const activePersonTasks = allPersonTasks.filter((task) => !isTaskCompleted(task)); const overduePersonTasks = activePersonTasks.filter((task) => task.deadline < todayIso()); const capacity = Math.max(1, Number(employee.task_capacity || 10)); const overload = Math.max(0, activePersonTasks.length - capacity); const critical = activePersonTasks.length > capacity * 1.25; return <div key={employee.id} className={`rounded-2xl border p-4 transition ${overload ? (critical ? 'border-rose-400 bg-rose-50 shadow-[0_0_0_3px_rgba(244,63,94,0.08)]' : 'border-amber-300 bg-amber-50') : 'border-slate-200 bg-white'}`}><div className="flex items-start justify-between gap-3"><div className="flex items-center gap-3"><span className="flex h-11 w-11 items-center justify-center rounded-2xl text-sm font-bold" style={{ backgroundColor: employee.color, color: contrastTextColor(employee.color) }}>{employeeInitials(employee.name)}</span><div><div className="flex flex-wrap items-center gap-2"><b>{employee.name}</b>{overload > 0 && <span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${critical ? 'bg-rose-600 text-white' : 'bg-amber-200 text-amber-900'}`}>Перегруз +{overload}</span>}{employee.is_active === false && <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[11px]">доступ отключён</span>}</div><p className="text-sm text-slate-500">{employee.role}</p><p className="mt-1 text-xs text-slate-400">Норма: {capacity} активных · вход по выбору имени</p></div></div>{isAdmin && <div className="flex gap-1"><button type="button" onClick={() => openEmployeeModal(employee)} className="rounded-lg p-2 text-violet-600 hover:bg-violet-50" title="Редактировать сотрудника и доступ"><Edit3 className="h-4 w-4" /></button><button type="button" onClick={() => deleteEmployee(employee)} className="rounded-lg p-2 text-rose-500 hover:bg-rose-50" title="Отключить доступ"><Trash2 className="h-4 w-4" /></button></div>}</div><div className="mt-4 grid grid-cols-3 gap-2 text-center text-xs"><span className="rounded-lg bg-violet-50 px-2 py-2 text-violet-800"><b className="block text-lg">{activePersonTasks.length}</b>активных</span><span className="rounded-lg bg-rose-100 px-2 py-2 text-rose-700"><b className="block text-lg">{overduePersonTasks.length}</b>просрочено</span><span className="rounded-lg bg-slate-100 px-2 py-2 text-slate-700"><b className="block text-lg">{capacity}</b>норма</span></div></div>; })}</div></div></Card>
+            <Card><div className="p-5"><div className="mb-5 flex items-center justify-between"><div><h2 className="text-xl font-semibold">Команда</h2><p className="text-sm text-slate-500">Карточка подсвечивается, когда активных задач больше установленной нормы.</p></div>{isAdmin && <button type="button" onClick={() => openEmployeeModal()} className="inline-flex items-center rounded-xl bg-sky-600 px-4 py-2 text-sm font-medium text-white"><UserPlus className="mr-2 h-4 w-4" />Добавить</button>}</div><div className="grid gap-3 sm:grid-cols-2">{employees.map((employee) => { const allPersonTasks = tasks.filter((task) => task.owner === employee.name); const activePersonTasks = workingTasks.filter((task) => task.owner === employee.name && !isTaskCompleted(task)); const overduePersonTasks = activePersonTasks.filter((task) => task.deadline && task.deadline < todayIso()); const actualHoursTotal = allPersonTasks.filter(isTaskCompleted).reduce((sum, task) => sum + (Number(task.actual_hours) || 0), 0); const capacity = Math.max(1, Number(employee.task_capacity || 10)); const overload = Math.max(0, activePersonTasks.length - capacity); const critical = activePersonTasks.length > capacity * 1.25; return <div key={employee.id} className={`rounded-2xl border p-4 transition ${overload ? (critical ? 'border-rose-400 bg-rose-50 shadow-[0_0_0_3px_rgba(244,63,94,0.08)]' : 'border-amber-300 bg-amber-50') : 'border-slate-200 bg-white'}`}><div className="flex items-start justify-between gap-3"><div className="flex items-center gap-3"><span className="flex h-11 w-11 items-center justify-center rounded-2xl text-sm font-bold" style={{ backgroundColor: employee.color, color: contrastTextColor(employee.color) }}>{employeeInitials(employee.name)}</span><div><div className="flex flex-wrap items-center gap-2"><b>{employee.name}</b>{overload > 0 && <span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${critical ? 'bg-rose-600 text-white' : 'bg-amber-200 text-amber-900'}`}>Перегруз +{overload}</span>}{employee.is_active === false && <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[11px]">доступ отключён</span>}</div><p className="text-sm text-slate-500">{employee.role}</p><p className="mt-1 text-xs text-slate-400">Норма: {capacity} активных · вход по выбору имени</p></div></div>{isAdmin && <div className="flex gap-1"><button type="button" onClick={() => openEmployeeModal(employee)} className="rounded-lg p-2 text-violet-600 hover:bg-violet-50" title="Редактировать сотрудника и доступ"><Edit3 className="h-4 w-4" /></button><button type="button" onClick={() => deleteEmployee(employee)} className="rounded-lg p-2 text-rose-500 hover:bg-rose-50" title="Отключить доступ"><Trash2 className="h-4 w-4" /></button></div>}</div><div className="mt-4 grid grid-cols-4 gap-2 text-center text-xs"><span className="rounded-lg bg-violet-50 px-2 py-2 text-violet-800"><b className="block text-lg">{activePersonTasks.length}</b>активных</span><span className="rounded-lg bg-rose-100 px-2 py-2 text-rose-700"><b className="block text-lg">{overduePersonTasks.length}</b>просрочено</span><span className="rounded-lg bg-emerald-50 px-2 py-2 text-emerald-700"><b className="block text-lg">{Math.round(actualHoursTotal * 10) / 10}</b>факт, ч</span><span className="rounded-lg bg-slate-100 px-2 py-2 text-slate-700"><b className="block text-lg">{capacity}</b>норма</span></div></div>; })}</div></div></Card>
             <Card><div className="p-5"><h2 className="flex items-center text-xl font-semibold"><Gauge className="mr-2 h-5 w-5" />Активные задачи против нормы</h2><p className="mb-4 text-sm text-slate-500">Красный — критический перегруз, жёлтый — превышение нормы. Серый столбец показывает индивидуальную норму сотрудника.</p><div className="h-[360px]"><ResponsiveContainer width="100%" height="100%"><BarChart data={workload} layout="vertical" margin={{ left: 15, right: 25 }}><XAxis type="number" allowDecimals={false} /><YAxis dataKey="name" type="category" width={90} /><Tooltip formatter={(value, name, props) => [value, name === 'tasks' ? `Активные · ${props.payload.overdue} просрочено` : 'Норма']} /><Legend /><Bar dataKey="capacity" name="Норма" fill="#cbd5e1" radius={[0, 8, 8, 0]} /><Bar dataKey="tasks" name="Активные" radius={[0, 10, 10, 0]}>{workload.map((entry) => <Cell key={entry.name} fill={entry.color} />)}</Bar></BarChart></ResponsiveContainer></div></div></Card>
             <Card className="xl:col-span-2"><div className="p-5"><h2 className="flex items-center text-xl font-semibold"><BarChart3 className="mr-2 h-5 w-5" />Структура активных задач по статусам</h2><p className="mb-3 text-sm text-slate-500">Круговая диаграмма показывает, где сейчас сосредоточена работа команды и сколько задач находится в блокерах.</p><div className="h-[340px]">{taskStatusChart.length ? <ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={taskStatusChart} dataKey="value" nameKey="name" cx="50%" cy="48%" innerRadius={72} outerRadius={118} paddingAngle={3} label={({ name, value }) => `${name}: ${value}`}>{taskStatusChart.map((entry) => <Cell key={entry.name} fill={entry.color} />)}</Pie><Tooltip formatter={(value) => [`${value} задач`, 'Количество']} /><Legend verticalAlign="bottom" height={36} /></PieChart></ResponsiveContainer> : <div className="flex h-full items-center justify-center text-slate-500">Активных задач пока нет.</div>}</div></div></Card>
           </div>
@@ -2844,6 +2895,18 @@ export default function App() {
         </Modal>
       )}
 
+      {completionTaskId && (
+        <Modal title="Закрытие задачи" subtitle="Перед завершением обязательно зафиксируйте фактически потраченное время." onClose={() => { setCompletionTaskId(null); setCompletionHours(''); setCompletionError(''); }} maxWidth="max-w-lg">
+          <div className="space-y-4">
+            <div className="rounded-2xl bg-slate-50 p-4"><p className="text-sm text-slate-500">Задача</p><b className="mt-1 block">{taskById.get(String(completionTaskId))?.title || 'Задача'}</b></div>
+            <Field label="Фактически потрачено, часов *"><input autoFocus type="number" min="0.1" step="0.25" value={completionHours} onChange={(event) => { setCompletionHours(event.target.value); setCompletionError(''); }} placeholder="Например: 2 или 1.5" className="w-full rounded-2xl border border-emerald-300 px-3 py-3 text-lg" /></Field>
+            <p className="text-xs text-slate-500">Можно указывать дробно: 0.5 = 30 минут, 1.25 = 1 час 15 минут.</p>
+            {completionError && <div className="rounded-xl bg-rose-50 px-3 py-2 text-sm text-rose-700">{completionError}</div>}
+          </div>
+          <ModalActions onCancel={() => { setCompletionTaskId(null); setCompletionHours(''); setCompletionError(''); }} onSave={confirmTaskCompletion} saveLabel="Закрыть задачу" />
+        </Modal>
+      )}
+
       {isTaskModalOpen && (
         <Modal title={editingTaskId ? 'Редактирование задачи' : 'Новая задача'} subtitle="Основная структура: раздел → проект → этап → задача. Для старых операционных задач сохранена прямая привязка к разделу." onClose={() => setIsTaskModalOpen(false)} maxWidth="max-w-3xl">
           <div className="grid gap-4 md:grid-cols-2">
@@ -2851,11 +2914,12 @@ export default function App() {
             <Field label="Проект"><select value={taskForm.project_id} onChange={(event) => setTaskForm({ ...taskForm, project_id: event.target.value, stage_id: '', section_id: event.target.value ? '' : taskForm.section_id })} className="w-full rounded-2xl border bg-white px-3 py-2.5"><option value="">Без проекта</option>{activeProjects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></Field>
             <Field label="Этап"><select value={taskForm.stage_id} onChange={(event) => setTaskForm({ ...taskForm, stage_id: event.target.value })} disabled={!taskForm.project_id} className="w-full rounded-2xl border bg-white px-3 py-2.5 disabled:bg-slate-100"><option value="">Без этапа</option>{selectedProjectStages.map((stage) => <option key={stage.id} value={stage.id}>{stage.sort_order}. {stage.title}</option>)}</select></Field>
             {!taskForm.project_id && <Field label="Раздел для задачи без проекта" className="md:col-span-2"><select value={taskForm.section_id} onChange={(event) => setTaskForm({ ...taskForm, section_id: event.target.value, project_id: event.target.value ? '' : taskForm.project_id, stage_id: event.target.value ? '' : taskForm.stage_id })} className="w-full rounded-2xl border bg-white px-3 py-2.5"><option value="">Без раздела</option>{sections.map((section) => <option key={section.id} value={section.id}>{section.name}</option>)}</select><span className="mt-1 block text-xs text-slate-500">Используйте только для отдельной задачи без проекта. Для обычной работы сначала выберите проект — его раздел определится автоматически.</span></Field>}
-            <Field label="Ответственный"><select value={taskForm.owner} onChange={(event) => setTaskForm({ ...taskForm, owner: event.target.value })} className="w-full rounded-2xl border bg-white px-3 py-2.5">{employeeNames.map((name) => <option key={name}>{name}</option>)}</select></Field>
-            <Field label="Дедлайн"><input type="date" value={taskForm.deadline} onChange={(event) => setTaskForm({ ...taskForm, deadline: event.target.value })} className="w-full rounded-2xl border px-3 py-2.5" /></Field>
+            <Field label="Ответственный"><select value={taskForm.owner} onChange={(event) => setTaskForm({ ...taskForm, owner: event.target.value })} className="w-full rounded-2xl border bg-white px-3 py-2.5"><option value="">Без ответственного</option>{taskForm.owner && !employeeNames.includes(taskForm.owner) && <option value={taskForm.owner}>{taskForm.owner}</option>}{employeeNames.map((name) => <option key={name}>{name}</option>)}</select></Field>
+            <Field label="Дедлайн (необязательно)"><input type="date" value={taskForm.deadline || ''} onChange={(event) => setTaskForm({ ...taskForm, deadline: event.target.value })} className="w-full rounded-2xl border px-3 py-2.5" /></Field>
             <Field label="Начало"><input type="time" value={taskForm.start_time} onChange={(event) => setTaskForm({ ...taskForm, start_time: event.target.value })} className="w-full rounded-2xl border px-3 py-2.5" /></Field>
             <Field label="Конец"><input type="time" value={taskForm.end_time} onChange={(event) => setTaskForm({ ...taskForm, end_time: event.target.value, hours: hoursBetween(taskForm.start_time, event.target.value) || taskForm.hours })} className="w-full rounded-2xl border px-3 py-2.5" /></Field>
             <Field label="Статус"><select value={taskForm.status} onChange={(event) => setTaskForm({ ...taskForm, status: event.target.value })} className="w-full rounded-2xl border bg-white px-3 py-2.5">{TASK_STATUSES.map((status) => <option key={status}>{status}</option>)}</select></Field>
+            {isTaskCompleted(taskForm.status) && <Field label="Фактически потрачено, часов *"><input type="number" min="0.1" step="0.25" value={taskForm.actual_hours} onChange={(event) => setTaskForm({ ...taskForm, actual_hours: event.target.value })} placeholder="Например: 1.5" className="w-full rounded-2xl border border-emerald-300 bg-emerald-50 px-3 py-2.5" /><span className="mt-1 block text-xs text-emerald-700">Обязательное поле для закрытой задачи.</span></Field>}
             <Field label="Приоритет"><select value={taskForm.priority} onChange={(event) => setTaskForm({ ...taskForm, priority: event.target.value })} className="w-full rounded-2xl border bg-white px-3 py-2.5">{PRIORITIES.map((priority) => <option key={priority}>{priority}</option>)}</select></Field>
             <Field label="Загрузка, часов"><input type="number" min="0" step="0.5" value={taskForm.hours} onChange={(event) => setTaskForm({ ...taskForm, hours: event.target.value })} className="w-full rounded-2xl border px-3 py-2.5" /></Field>
             <Field label="Измеримый результат" className="md:col-span-2"><textarea value={taskForm.result} onChange={(event) => setTaskForm({ ...taskForm, result: event.target.value })} rows="2" placeholder="Что будет считаться готовым результатом" className="w-full rounded-2xl border px-3 py-2.5" /></Field>

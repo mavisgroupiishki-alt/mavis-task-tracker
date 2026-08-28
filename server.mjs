@@ -27,7 +27,7 @@ app.use(express.json({ limit: '3mb' }));
 // Render health check must verify only that this Node service is alive.
 // It must NOT depend on Supabase, Bitrix VibeCode, or any external API.
 app.get('/healthz', (_req, res) => {
-  res.status(200).json({ ok: true, service: 'mavis-task-tracker', version: '6.2.3' });
+  res.status(200).json({ ok: true, service: 'mavis-task-tracker', version: '6.2.4' });
 });
 
 const upload = multer({
@@ -220,7 +220,7 @@ app.get('/api/db-ping', async (_req, res) => {
       ok: true,
       service: 'mavis-task-tracker',
       database: 'supabase',
-      version: '6.2.3',
+      version: '6.2.4',
       checkedAt: new Date().toISOString(),
     };
     dbPingCache = { checkedAt: now, status: 200, body };
