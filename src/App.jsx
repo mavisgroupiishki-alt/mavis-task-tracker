@@ -1173,7 +1173,9 @@ export default function App() {
 
   const workingTasks = useMemo(() => tasks.filter((task) => {
     const project = projectById.get(String(task.project_id));
-    return !task.backlog && !project?.archived && !project?.backlog;
+    // A task can be returned to work individually even while its parent project stays in backlog.
+    // Moving a whole project to backlog explicitly marks all of its tasks as backlog (see setProjectBacklog).
+    return !task.backlog && !project?.archived;
   }), [tasks, projectById]);
 
   const filteredTasks = useMemo(() => {
@@ -1761,6 +1763,16 @@ export default function App() {
       setMessage('Чтобы закрыть задачу, обязательно укажите фактически потраченное время.');
       return;
     }
+    const targetProjectForSave = taskForm.project_id ? projectById.get(String(taskForm.project_id)) : null;
+    const movedIntoBacklogProject = Boolean(
+      targetProjectForSave?.backlog
+      && previousTaskForSave
+      && String(previousTaskForSave.project_id || '') !== String(taskForm.project_id || '')
+    );
+    const taskShouldBeBacklog = previousTaskForSave
+      ? (movedIntoBacklogProject ? true : Boolean(previousTaskForSave.backlog))
+      : Boolean(targetProjectForSave?.backlog);
+
     const payload = {
       title: taskForm.title.trim(),
       owner: taskForm.owner || null,
@@ -1780,6 +1792,8 @@ export default function App() {
       project_id: taskForm.project_id || null,
       stage_id: taskForm.stage_id || null,
       section_id: taskForm.section_id || null,
+      backlog: taskShouldBeBacklog,
+      backlog_at: taskShouldBeBacklog ? (previousTaskForSave?.backlog_at || new Date().toISOString()) : null,
     };
 
     try {
@@ -2058,19 +2072,33 @@ export default function App() {
   }
 
   async function setProjectBacklog(project, backlog) {
-    const previous = project;
+    const previousProject = project;
+    const previousTasks = tasks.filter((task) => String(task.project_id) === String(project.id));
     const backlogAt = backlog ? new Date().toISOString() : '';
     const updated = { ...project, backlog, backlog_at: backlogAt };
+
     setProjects((items) => items.map((item) => String(item.id) === String(project.id) ? updated : item));
+    // Whole project to backlog = all its tasks to backlog. Whole project back to work = all its tasks back to work.
+    setTasks((items) => items.map((task) => String(task.project_id) === String(project.id)
+      ? { ...task, backlog, backlog_at: backlog ? (task.backlog_at || backlogAt) : '' }
+      : task));
+
     try {
       if (supabase && isRemoteId(project.id)) {
-        const { error } = await supabase.from('projects').update({ backlog, backlog_at: backlog ? backlogAt : null }).eq('id', project.id);
-        if (error) throw error;
+        const { error: projectError } = await supabase.from('projects').update({ backlog, backlog_at: backlog ? backlogAt : null }).eq('id', project.id);
+        if (projectError) throw projectError;
+
+        const { error: taskError } = await supabase.from('tasks').update({ backlog, backlog_at: backlog ? backlogAt : null }).eq('project_id', project.id);
+        if (taskError) throw taskError;
       }
-      setMessage(backlog ? `Проект «${project.name}» перемещён в бэклог.` : `Проект «${project.name}» возвращён в работу.`);
+      setMessage(backlog
+        ? `Проект «${project.name}» и его задачи перемещены в бэклог.`
+        : `Проект «${project.name}» и его задачи возвращены в работу.`);
     } catch (error) {
-      setProjects((items) => items.map((item) => String(item.id) === String(project.id) ? previous : item));
-      setMessage(`Не удалось изменить бэклог проекта. Выполните supabase_v6_2_3_backlog.sql. ${error.message}`);
+      setProjects((items) => items.map((item) => String(item.id) === String(project.id) ? previousProject : item));
+      const previousById = new Map(previousTasks.map((task) => [String(task.id), task]));
+      setTasks((items) => items.map((task) => previousById.get(String(task.id)) || task));
+      setMessage(`Не удалось изменить бэклог проекта. ${error.message}`);
     }
   }
 
@@ -2255,6 +2283,106 @@ export default function App() {
     }
   }
 
+  function renderBacklogProjectCard(project) {
+    const projectStages = stages.filter((stage) => String(stage.project_id) === String(project.id)).sort((a, b) => a.sort_order - b.sort_order);
+    const allProjectTasks = tasks.filter((task) => String(task.project_id) === String(project.id));
+    const directProjectTasks = allProjectTasks.filter((task) => !task.stage_id);
+    const progress = calculateProgress(allProjectTasks);
+    const derivedStatus = deriveStatus(allProjectTasks, project.status);
+    const health = projectHealth(project, allProjectTasks);
+    const expanded = expandedProjects[project.id] !== false;
+
+    const renderBacklogTaskRow = (task) => (
+      <div key={task.id} className="grid gap-3 border-b px-4 py-3 last:border-b-0 lg:grid-cols-[minmax(260px,2fr)_130px_135px_150px_minmax(180px,1fr)_155px] lg:items-center">
+        <div>
+          <div className="flex flex-wrap items-center gap-2">
+            <b className="text-sm">{task.title}</b>
+            <span className={`rounded-full px-2 py-0.5 text-[11px] ${priorityStyle(task.priority)}`}>{task.priority}</span>
+            {task.backlog
+              ? <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[11px] text-amber-800">В бэклоге</span>
+              : <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] text-emerald-800">В работе отдельно</span>}
+            {task.deadline && task.deadline < todayIso() && !isTaskCompleted(task) && <span className="rounded-full bg-rose-100 px-2 py-0.5 text-[11px] text-rose-700">Просрочено</span>}
+          </div>
+          {task.result && <p className="mt-1 text-xs text-slate-500">Результат: {task.result}</p>}
+        </div>
+        <span className="text-sm">{formatDate(task.deadline)}</span>
+        <span className="text-sm font-medium">{task.owner || 'Без ответственного'}</span>
+        <select value={task.status} onChange={(event) => updateTaskStatus(task.id, event.target.value)} className={`rounded-xl border-0 px-2.5 py-2 text-sm ${statusStyle(task.status)}`}>{TASK_STATUSES.map((status) => <option key={status}>{status}</option>)}</select>
+        <div className="min-w-0 text-sm text-slate-600"><span className="block">{task.comment || '—'}</span><TaskResourceLink url={task.resource_url} compact /></div>
+        <span className="flex flex-wrap gap-1">
+          <button type="button" onClick={() => setTaskBacklog(task, !task.backlog)} className={`rounded-lg p-2 ${task.backlog ? 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100' : 'bg-amber-50 text-amber-800 hover:bg-amber-100'}`} title={task.backlog ? 'Вернуть только эту задачу в работу' : 'Вернуть задачу в бэклог'}>{task.backlog ? <Undo2 className="h-4 w-4" /> : <Inbox className="h-4 w-4" />}</button>
+          <button type="button" onClick={() => openTaskModal(task)} className="rounded-lg bg-violet-50 p-2 text-violet-700 hover:bg-violet-100" title="Редактировать задачу"><Edit3 className="h-4 w-4" /></button>
+          <button type="button" onClick={() => deleteTask(task)} className="rounded-lg bg-rose-50 p-2 text-rose-600 hover:bg-rose-100" title="Удалить задачу"><Trash2 className="h-4 w-4" /></button>
+        </span>
+      </div>
+    );
+
+    return (
+      <Card key={project.id} className="overflow-hidden">
+        <div className="h-2" style={{ backgroundColor: project.color }} />
+        <div className="p-5 md:p-6">
+          <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+            <button type="button" onClick={() => setExpandedProjects((previous) => ({ ...previous, [project.id]: !expanded }))} className="flex flex-1 items-start gap-3 text-left">
+              <span className="mt-1 rounded-2xl p-2.5" style={{ backgroundColor: project.color, color: contrastTextColor(project.color) }}><FolderKanban className="h-5 w-5" /></span>
+              <span className="min-w-0 flex-1">
+                <span className="flex flex-wrap items-center gap-2"><span className="text-xl font-bold">{project.name}</span><span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-medium text-amber-900">В бэклоге</span><span className={`rounded-full px-3 py-1 text-xs ${statusStyle(derivedStatus)}`}>{derivedStatus}</span><HealthBadge health={health} /></span>
+                <span className="mt-1 block text-sm text-slate-500">{project.description || 'Описание проекта не заполнено'}</span>
+                <span className="mt-3 block max-w-xl"><ProgressBar value={progress} color={project.color} /></span>
+              </span>
+              {expanded ? <ChevronUp className="mt-2 h-5 w-5 text-slate-400" /> : <ChevronDown className="mt-2 h-5 w-5 text-slate-400" />}
+            </button>
+            <div className="flex flex-wrap gap-2 text-sm">
+              <span className="rounded-xl bg-slate-100 px-3 py-2"><b>Ответственный: {project.owner || 'не указан'}</b> · {project.deadline ? formatDate(project.deadline) : 'без общего срока'}</span>
+              <select value={project.section_id || ''} onChange={(event) => moveProjectToSection(project, event.target.value)} className="rounded-xl border border-cyan-200 bg-cyan-50 px-3 py-2 text-sm font-medium text-cyan-800"><option value="">Без раздела</option>{sections.map((section) => <option key={section.id} value={section.id}>{section.name}</option>)}</select>
+              {project.customer && <span className="rounded-xl bg-amber-50 px-3 py-2 text-amber-800"><b>Заказчик:</b> {project.customer}</span>}
+              <span className="rounded-xl bg-slate-100 px-3 py-2">{projectStages.length} этапов · {allProjectTasks.length} задач</span>
+              <button type="button" onClick={() => openStageModal(project.id)} className="inline-flex items-center rounded-xl bg-sky-50 px-3 py-2 font-medium text-sky-700 hover:bg-sky-100"><Layers3 className="mr-1.5 h-4 w-4" />Этап</button>
+              <button type="button" onClick={() => openTaskModal(null, project.id)} className="inline-flex items-center rounded-xl bg-violet-50 px-3 py-2 font-medium text-violet-700 hover:bg-violet-100"><Plus className="mr-1.5 h-4 w-4" />Задача</button>
+              <button type="button" onClick={() => openProjectModal(project)} className="rounded-xl border px-3 py-2 text-slate-600 hover:bg-slate-50" title="Редактировать проект"><Edit3 className="h-4 w-4" /></button>
+              <button type="button" onClick={() => createTemplateFromProject(project)} className="rounded-xl border border-indigo-100 px-3 py-2 text-indigo-700 hover:bg-indigo-50" title="Создать шаблон"><ClipboardCopy className="h-4 w-4" /></button>
+              <button type="button" onClick={() => setProjectBacklog(project, false)} className="inline-flex items-center rounded-xl bg-emerald-50 px-3 py-2 font-medium text-emerald-700 hover:bg-emerald-100" title="Вернуть весь проект и все его задачи в работу"><Undo2 className="mr-1.5 h-4 w-4" />Вернуть проект</button>
+              <button type="button" onClick={() => setProjectArchived(project, true)} className="rounded-xl border border-slate-200 px-3 py-2 text-slate-700 hover:bg-slate-50" title="В архив"><Archive className="h-4 w-4" /></button>
+              <button type="button" onClick={() => deleteProject(project)} className="rounded-xl border border-rose-100 px-3 py-2 text-rose-600 hover:bg-rose-50" title="Удалить проект"><Trash2 className="h-4 w-4" /></button>
+            </div>
+          </div>
+
+          {expanded && (
+            <div className="mt-6 space-y-3">
+              {projectStages.map((stage) => {
+                const stageTasks = allProjectTasks.filter((task) => String(task.stage_id) === String(stage.id));
+                const stageProgress = calculateProgress(stageTasks);
+                const stageStatus = deriveStatus(stageTasks);
+                const stageExpanded = expandedStages[stage.id] !== false;
+                return (
+                  <div key={stage.id} className="overflow-hidden rounded-2xl border border-slate-200 bg-slate-50/80">
+                    <div className="flex flex-col gap-3 p-4 lg:flex-row lg:items-center lg:justify-between">
+                      <button type="button" onClick={() => setExpandedStages((previous) => ({ ...previous, [stage.id]: !stageExpanded }))} className="flex flex-1 items-center gap-3 text-left">
+                        <span className="rounded-xl bg-white p-2 text-violet-600 shadow-sm"><Layers3 className="h-4 w-4" /></span>
+                        <span className="min-w-0 flex-1"><span className="flex flex-wrap items-center gap-2"><b>{stage.sort_order}. {stage.title}</b><span className={`rounded-full px-2.5 py-1 text-xs ${statusStyle(stageStatus)}`}>{stageStatus}</span></span><span className="mt-1 block max-w-md"><ProgressBar value={stageProgress} color={project.color} /></span></span>
+                        {stageExpanded ? <ChevronUp className="h-4 w-4 text-slate-400" /> : <ChevronDown className="h-4 w-4 text-slate-400" />}
+                      </button>
+                      <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600"><span className="rounded-lg bg-white px-2.5 py-1.5">{stage.owner || 'Без ответственного'}</span><span className="rounded-lg bg-white px-2.5 py-1.5">{stage.deadline ? formatDate(stage.deadline) : 'Без срока'}</span><span className="rounded-lg bg-white px-2.5 py-1.5">{stageTasks.length} задач</span><button type="button" onClick={() => openTaskModal(null, project.id, stage.id)} className="inline-flex items-center rounded-lg bg-violet-600 px-3 py-1.5 font-medium text-white hover:bg-violet-500"><Plus className="mr-1 h-3.5 w-3.5" />Задача</button><button type="button" onClick={() => openStageModal(project.id, stage)} className="rounded-lg bg-white p-1.5 hover:bg-slate-100" title="Редактировать этап"><Edit3 className="h-3.5 w-3.5" /></button><button type="button" onClick={() => deleteStage(stage)} className="rounded-lg bg-white p-1.5 text-rose-600 hover:bg-rose-50" title="Удалить этап"><Trash2 className="h-3.5 w-3.5" /></button></div>
+                    </div>
+                    {stageExpanded && <div className="border-t bg-white"><div className="hidden grid-cols-[minmax(260px,2fr)_130px_135px_150px_minmax(180px,1fr)_155px] gap-3 border-b bg-slate-50 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-slate-500 lg:grid"><span>Задача</span><span>Дедлайн</span><span>Ответственный</span><span>Статус</span><span>Комментарий</span><span>Действия</span></div>{stageTasks.map(renderBacklogTaskRow)}{stageTasks.length === 0 && <div className="p-5 text-center text-sm text-slate-500">В этом этапе пока нет задач.</div>}</div>}
+                  </div>
+                );
+              })}
+
+              {directProjectTasks.length > 0 && (
+                <div className="overflow-hidden rounded-2xl border border-dashed border-amber-200 bg-amber-50/40">
+                  <div className="flex flex-col gap-2 border-b border-amber-100 px-4 py-3 sm:flex-row sm:items-center sm:justify-between"><div><h4 className="font-semibold text-amber-950">Задачи проекта без этапа</h4><p className="text-xs text-amber-800">Каждую задачу можно вернуть в работу отдельно, не возвращая весь проект.</p></div><span className="rounded-lg bg-white px-2.5 py-1.5 text-xs text-amber-900">{directProjectTasks.length} задач</span></div>
+                  <div className="bg-white"><div className="hidden grid-cols-[minmax(260px,2fr)_130px_135px_150px_minmax(180px,1fr)_155px] gap-3 border-b bg-amber-50/60 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-amber-900 lg:grid"><span>Задача</span><span>Дедлайн</span><span>Ответственный</span><span>Статус</span><span>Комментарий</span><span>Действия</span></div>{directProjectTasks.map(renderBacklogTaskRow)}</div>
+                </div>
+              )}
+
+              {projectStages.length === 0 && directProjectTasks.length === 0 && <div className="rounded-2xl border border-dashed bg-slate-50 p-6 text-center text-sm text-slate-500">В проекте ещё нет этапов и задач. Их можно добавить прямо здесь.</div>}
+            </div>
+          )}
+        </div>
+      </Card>
+    );
+  }
+
   const selectedProjectStages = stages.filter((stage) => String(stage.project_id) === String(taskForm.project_id)).sort((a, b) => a.sort_order - b.sort_order);
   const editingTask = editingTaskId ? taskById.get(String(editingTaskId)) : null;
   const deadlineWasChanged = Boolean(editingTask && taskForm.deadline !== editingTask.deadline);
@@ -2393,7 +2521,7 @@ export default function App() {
           <div className="flex flex-col gap-6 xl:flex-row xl:items-center xl:justify-between">
             <div className="max-w-3xl">
               <div className="mb-3 inline-flex items-center rounded-full bg-white/10 px-3 py-1 text-xs font-medium text-violet-100 ring-1 ring-white/10">
-                <Sparkles className="mr-2 h-3.5 w-3.5" /> MAVIS GROUP · центр проектов · версия 6.2.5
+                <Sparkles className="mr-2 h-3.5 w-3.5" /> MAVIS GROUP · центр проектов · версия 6.2.6
               </div>
               <h1 className="text-3xl font-bold tracking-tight md:text-4xl">Разделы → проекты → этапы → задачи</h1>
               <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-300 md:text-base">Собирайте проекты по направлениям, управляйте стадиями и показывайте только нужные статусы задач без потери общей истории.</p>
@@ -2775,41 +2903,33 @@ export default function App() {
             <Card>
               <div className="p-5 md:p-6">
                 <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-                  <div><h2 className="flex items-center text-2xl font-bold"><Inbox className="mr-2 h-6 w-6 text-amber-600" />Бэклог</h2><p className="mt-1 text-sm text-slate-500">Сюда складываем проекты и задачи, которые сейчас неактуальны, но удалять или закрывать их не нужно. Они не попадают в рабочие списки, календарь и загрузку команды.</p></div>
+                  <div><h2 className="flex items-center text-2xl font-bold"><Inbox className="mr-2 h-6 w-6 text-amber-600" />Бэклог</h2><p className="mt-1 text-sm text-slate-500">Полноценная рабочая копия вкладки «Проекты» для неактуального. Проекты, этапы и задачи можно раскрывать и редактировать прямо здесь. Отдельную задачу можно вернуть в работу, оставив весь проект в бэклоге.</p></div>
                   <div className="flex flex-wrap gap-2"><span className="rounded-xl bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-900">{backlogProjects.length} проектов</span><span className="rounded-xl bg-slate-100 px-3 py-2 text-sm font-semibold text-slate-700">{backlogTasks.length} отдельных задач</span></div>
                 </div>
               </div>
             </Card>
 
-            <div className="grid gap-5 xl:grid-cols-2">
-              <Card>
-                <div className="p-5">
-                  <div className="mb-4"><h3 className="text-xl font-semibold">Проекты в бэклоге</h3><p className="text-sm text-slate-500">При возврате проект снова появится в разделах и рабочих списках вместе со своими задачами.</p></div>
-                  <div className="space-y-3">
-                    {filteredBacklogProjects.map((project) => {
-                      const projectTasks = tasks.filter((task) => String(task.project_id) === String(project.id));
-                      const section = sectionById.get(String(project.section_id));
-                      return <div key={project.id} className="rounded-2xl border border-amber-200 bg-amber-50/40 p-4"><div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><b className="text-base">{project.name}</b><span className="rounded-full bg-amber-100 px-2.5 py-1 text-xs font-medium text-amber-900">В бэклоге</span></div><p className="mt-1 text-sm text-slate-500">{project.description || 'Описание проекта не заполнено'}</p><p className="mt-2 text-xs text-slate-500">{section?.name || 'Без раздела'} · {project.owner}{project.customer ? ` · Заказчик: ${project.customer}` : ''} · {projectTasks.length} задач{project.backlog_at ? ` · с ${formatDateTime(project.backlog_at)}` : ''}</p></div><button type="button" onClick={() => setProjectBacklog(project, false)} className="inline-flex shrink-0 items-center rounded-xl bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-100"><Undo2 className="mr-2 h-4 w-4" />Вернуть в работу</button></div>{projectTasks.length > 0 && <div className="mt-3 space-y-1 border-t border-amber-100 pt-3">{projectTasks.slice(0, 5).map((task) => <div key={task.id} className="flex items-center justify-between gap-3 text-sm"><span className="truncate">{task.title}</span><span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] ${statusStyle(task.status)}`}>{task.status}</span></div>)}{projectTasks.length > 5 && <p className="text-xs text-slate-400">Ещё {projectTasks.length - 5} задач</p>}</div>}</div>;
-                    })}
-                    {filteredBacklogProjects.length === 0 && <div className="rounded-2xl border border-dashed p-8 text-center text-slate-500">Проектов в бэклоге пока нет.</div>}
-                  </div>
-                </div>
-              </Card>
-
-              <Card>
-                <div className="p-5">
-                  <div className="mb-4"><h3 className="text-xl font-semibold">Отдельные задачи в бэклоге</h3><p className="text-sm text-slate-500">Это задачи, которые убраны из работы отдельно, без переноса всего проекта.</p></div>
-                  <div className="space-y-3">
-                    {filteredBacklogTasks.map((task) => {
-                      const project = projectById.get(String(task.project_id));
-                      const stage = stageById.get(String(task.stage_id));
-                      return <div key={task.id} className="rounded-2xl border bg-white p-4"><div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between"><div className="min-w-0"><div className="flex flex-wrap gap-2"><span className={`rounded-full px-2.5 py-1 text-xs ${statusStyle(task.status)}`}>{task.status}</span><span className={`rounded-full px-2.5 py-1 text-xs ${priorityStyle(task.priority)}`}>{task.priority}</span></div><b className="mt-2 block">{task.title}</b><p className="mt-1 text-sm text-slate-500">{project?.name || 'Без проекта'}{stage ? ` · ${stage.title}` : ''} · {task.owner || 'Без ответственного'} · {formatDate(task.deadline)}</p>{task.comment && <p className="mt-2 text-sm text-slate-600">{task.comment}</p>}</div><div className="flex shrink-0 gap-2"><button type="button" onClick={() => setTaskBacklog(task, false)} className="inline-flex items-center rounded-xl bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-100"><Undo2 className="mr-2 h-4 w-4" />Вернуть</button><button type="button" onClick={() => openTaskModal(task)} className="rounded-xl bg-violet-50 p-2 text-violet-700" title="Редактировать"><Edit3 className="h-4 w-4" /></button></div></div></div>;
-                    })}
-                    {filteredBacklogTasks.length === 0 && <div className="rounded-2xl border border-dashed p-8 text-center text-slate-500">Отдельных задач в бэклоге пока нет.</div>}
-                  </div>
-                </div>
-              </Card>
+            <div>
+              <div className="mb-3"><h3 className="text-xl font-semibold">Проекты в бэклоге</h3><p className="text-sm text-slate-500">Карточка устроена так же, как во вкладке «Проекты»: этапы, задачи, статусы, ответственные, сроки и редактирование доступны на месте.</p></div>
+              <div className="space-y-5">
+                {filteredBacklogProjects.map((project) => renderBacklogProjectCard(project))}
+                {filteredBacklogProjects.length === 0 && <Card><div className="p-8 text-center text-slate-500">Проектов в бэклоге пока нет.</div></Card>}
+              </div>
             </div>
+
+            <Card>
+              <div className="p-5">
+                <div className="mb-4"><h3 className="text-xl font-semibold">Отдельные задачи в бэклоге</h3><p className="text-sm text-slate-500">Это задачи из рабочих проектов, которые были убраны в бэклог отдельно. Их также можно редактировать или вернуть в работу.</p></div>
+                <div className="space-y-3">
+                  {filteredBacklogTasks.map((task) => {
+                    const project = projectById.get(String(task.project_id));
+                    const stage = stageById.get(String(task.stage_id));
+                    return <div key={task.id} className="rounded-2xl border bg-white p-4"><div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between"><div className="min-w-0"><div className="flex flex-wrap gap-2"><span className={`rounded-full px-2.5 py-1 text-xs ${statusStyle(task.status)}`}>{task.status}</span><span className={`rounded-full px-2.5 py-1 text-xs ${priorityStyle(task.priority)}`}>{task.priority}</span></div><b className="mt-2 block">{task.title}</b><p className="mt-1 text-sm text-slate-500">{project?.name || 'Без проекта'}{stage ? ` · ${stage.title}` : ''} · {task.owner || 'Без ответственного'} · {formatDate(task.deadline)}</p>{task.comment && <p className="mt-2 text-sm text-slate-600">{task.comment}</p>}</div><div className="flex shrink-0 gap-2"><button type="button" onClick={() => setTaskBacklog(task, false)} className="inline-flex items-center rounded-xl bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-100"><Undo2 className="mr-2 h-4 w-4" />Вернуть</button><button type="button" onClick={() => openTaskModal(task)} className="rounded-xl bg-violet-50 p-2 text-violet-700" title="Редактировать"><Edit3 className="h-4 w-4" /></button></div></div></div>;
+                  })}
+                  {filteredBacklogTasks.length === 0 && <div className="rounded-2xl border border-dashed p-8 text-center text-slate-500">Отдельных задач в бэклоге пока нет.</div>}
+                </div>
+              </div>
+            </Card>
           </div>
         )}
 
@@ -2893,7 +3013,7 @@ export default function App() {
       {isStageModalOpen && (
         <Modal title={editingStageId ? 'Редактирование этапа' : 'Новый этап'} subtitle="Крупный блок работ внутри проекта." onClose={() => setIsStageModalOpen(false)} maxWidth="max-w-2xl">
           <div className="grid gap-4 md:grid-cols-2">
-            <Field label="Проект" className="md:col-span-2"><select value={stageForm.project_id} onChange={(event) => setStageForm({ ...stageForm, project_id: event.target.value })} className="w-full rounded-2xl border bg-white px-3 py-2.5">{activeProjects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></Field>
+            <Field label="Проект" className="md:col-span-2"><select value={stageForm.project_id} onChange={(event) => setStageForm({ ...stageForm, project_id: event.target.value })} className="w-full rounded-2xl border bg-white px-3 py-2.5">{projects.filter((project) => !project.archived).map((project) => <option key={project.id} value={project.id}>{project.name}{project.backlog ? ' · Бэклог' : ''}</option>)}</select></Field>
             <Field label="Название этапа" className="md:col-span-2"><input value={stageForm.title} onChange={(event) => setStageForm({ ...stageForm, title: event.target.value })} placeholder="Например: Финальная настройка" className="w-full rounded-2xl border px-3 py-2.5" /></Field>
             <Field label="Ответственный"><select value={stageForm.owner} onChange={(event) => setStageForm({ ...stageForm, owner: event.target.value })} className="w-full rounded-2xl border bg-white px-3 py-2.5">{employeeNames.map((name) => <option key={name}>{name}</option>)}</select></Field>
             <Field label="Дедлайн этапа"><input type="date" value={stageForm.deadline} onChange={(event) => setStageForm({ ...stageForm, deadline: event.target.value })} className="w-full rounded-2xl border px-3 py-2.5" /></Field>
@@ -2932,7 +3052,7 @@ export default function App() {
         <Modal title={editingTaskId ? 'Редактирование задачи' : 'Новая задача'} subtitle="Основная структура: раздел → проект → этап → задача. Для старых операционных задач сохранена прямая привязка к разделу." onClose={() => setIsTaskModalOpen(false)} maxWidth="max-w-3xl">
           <div className="grid gap-4 md:grid-cols-2">
             <Field label="Задача" className="md:col-span-2"><input value={taskForm.title} onChange={(event) => setTaskForm({ ...taskForm, title: event.target.value })} placeholder="Конкретное действие и ожидаемый результат" className="w-full rounded-2xl border px-3 py-2.5" /></Field>
-            <Field label="Проект"><select value={taskForm.project_id} onChange={(event) => setTaskForm({ ...taskForm, project_id: event.target.value, stage_id: '', section_id: event.target.value ? '' : taskForm.section_id })} className="w-full rounded-2xl border bg-white px-3 py-2.5"><option value="">Без проекта</option>{activeProjects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></Field>
+            <Field label="Проект"><select value={taskForm.project_id} onChange={(event) => setTaskForm({ ...taskForm, project_id: event.target.value, stage_id: '', section_id: event.target.value ? '' : taskForm.section_id })} className="w-full rounded-2xl border bg-white px-3 py-2.5"><option value="">Без проекта</option>{projects.filter((project) => !project.archived).map((project) => <option key={project.id} value={project.id}>{project.name}{project.backlog ? ' · Бэклог' : ''}</option>)}</select></Field>
             <Field label="Этап"><select value={taskForm.stage_id} onChange={(event) => setTaskForm({ ...taskForm, stage_id: event.target.value })} disabled={!taskForm.project_id} className="w-full rounded-2xl border bg-white px-3 py-2.5 disabled:bg-slate-100"><option value="">Без этапа</option>{selectedProjectStages.map((stage) => <option key={stage.id} value={stage.id}>{stage.sort_order}. {stage.title}</option>)}</select></Field>
             {!taskForm.project_id && <Field label="Раздел для задачи без проекта" className="md:col-span-2"><select value={taskForm.section_id} onChange={(event) => setTaskForm({ ...taskForm, section_id: event.target.value, project_id: event.target.value ? '' : taskForm.project_id, stage_id: event.target.value ? '' : taskForm.stage_id })} className="w-full rounded-2xl border bg-white px-3 py-2.5"><option value="">Без раздела</option>{sections.map((section) => <option key={section.id} value={section.id}>{section.name}</option>)}</select><span className="mt-1 block text-xs text-slate-500">Используйте только для отдельной задачи без проекта. Для обычной работы сначала выберите проект — его раздел определится автоматически.</span></Field>}
             <Field label="Ответственный"><select value={taskForm.owner} onChange={(event) => setTaskForm({ ...taskForm, owner: event.target.value })} className="w-full rounded-2xl border bg-white px-3 py-2.5"><option value="">Без ответственного</option>{taskForm.owner && !employeeNames.includes(taskForm.owner) && <option value={taskForm.owner}>{taskForm.owner}</option>}{employeeNames.map((name) => <option key={name}>{name}</option>)}</select></Field>
