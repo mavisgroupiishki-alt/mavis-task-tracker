@@ -17,7 +17,8 @@ import {
 
 const TASK_STATUSES = ['Ожидает', 'Новая', 'В работе', 'На проверке', 'Блокер', 'Готово'];
 const PRIORITIES = ['Низкий', 'Средний', 'Высокий'];
-const MEETING_SEGMENT_MS = 15 * 60 * 1000;
+const MEETING_SEGMENT_MS = 10 * 60 * 1000;
+const TRANSCRIBE_MAX_ATTEMPTS = 3;
 
 function todayIso() {
   const now = new Date();
@@ -42,11 +43,36 @@ function audioExtension(mimeType) {
 }
 
 async function apiJson(url, options = {}) {
-  const response = await fetch(url, options);
+  let response;
+  try {
+    response = await fetch(url, options);
+  } catch (cause) {
+    const error = new Error(cause?.message || 'Failed to fetch');
+    error.code = 'network_error';
+    error.cause = cause;
+    throw error;
+  }
   const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload?.error || `HTTP ${response.status}`);
+  if (!response.ok) {
+    const error = new Error(payload?.error || `HTTP ${response.status}`);
+    error.status = response.status;
+    error.payload = payload;
+    const retryAfter = Number(response.headers.get('Retry-After') || 0);
+    if (retryAfter > 0) error.retryAfterMs = retryAfter * 1000;
+    throw error;
+  }
   return payload;
 }
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableTranscriptionError(error) {
+  if (!error?.status) return true;
+  return [408, 425, 429, 500, 502, 503, 504].includes(Number(error.status));
+}
+
 
 function normalizedDraft(raw = {}, fallbackOwner = '') {
   return {
@@ -132,6 +158,7 @@ export default function AiAssistantPanel({ sections, projects, stages, employees
   const [meetingElapsed, setMeetingElapsed] = useState(0);
   const [meetingPending, setMeetingPending] = useState(0);
   const [meetingSegments, setMeetingSegments] = useState([]);
+  const [meetingFailedSegments, setMeetingFailedSegments] = useState([]);
   const [meetingDrafts, setMeetingDrafts] = useState([]);
   const [meetingSummary, setMeetingSummary] = useState('');
   const [meetingDecisions, setMeetingDecisions] = useState([]);
@@ -143,6 +170,7 @@ export default function AiAssistantPanel({ sections, projects, stages, employees
   const meetingSegmentTimeoutRef = useRef(null);
   const meetingTimerRef = useRef(null);
   const meetingSegmentIndexRef = useRef(0);
+  const meetingQueueRef = useRef(Promise.resolve());
 
   const activeProjects = useMemo(() => projects.filter((item) => !item.archived_at && item.status !== 'Готово'), [projects]);
   const context = useMemo(() => ({
@@ -172,11 +200,22 @@ export default function AiAssistantPanel({ sections, projects, stages, employees
     setter((items) => items.map((item, itemIndex) => itemIndex === index ? value : item));
   }
 
-  async function transcribeBlob(blob, filename) {
-    const form = new FormData();
-    form.append('audio', blob, filename);
-    form.append('language', 'ru');
-    return apiJson('/api/ai/transcribe', { method: 'POST', body: form });
+  async function transcribeBlob(blob, filename, maxAttempts = TRANSCRIBE_MAX_ATTEMPTS) {
+    let lastError;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        const form = new FormData();
+        form.append('audio', blob, filename);
+        form.append('language', 'ru');
+        return await apiJson('/api/ai/transcribe', { method: 'POST', body: form });
+      } catch (error) {
+        lastError = error;
+        if (attempt >= maxAttempts || !isRetryableTranscriptionError(error)) throw error;
+        const delay = error?.retryAfterMs || (attempt === 1 ? 2500 : 7000);
+        await sleep(delay);
+      }
+    }
+    throw lastError || new Error('Не удалось расшифровать аудио.');
   }
 
   async function startQuickRecording() {
@@ -248,16 +287,47 @@ export default function AiAssistantPanel({ sections, projects, stages, employees
     }
   }
 
-  async function processMeetingSegment(blob, index) {
+  async function processMeetingSegment(blob, index, { keepFailed = true } = {}) {
+    const filename = `meeting-${index + 1}.${audioExtension(blob.type)}`;
+    try {
+      const transcription = await transcribeBlob(blob, filename);
+      setMeetingSegments((items) => [...items.filter((item) => item.index !== index), { index, text: transcription.text || '' }].sort((a, b) => a.index - b.index));
+      setMeetingFailedSegments((items) => items.filter((item) => item.index !== index));
+      return true;
+    } catch (error) {
+      if (keepFailed) {
+        setMeetingFailedSegments((items) => [
+          ...items.filter((item) => item.index !== index),
+          { index, blob, filename, error: error.message || 'Ошибка расшифровки' },
+        ].sort((a, b) => a.index - b.index));
+      }
+      setGlobalError(`Не удалось расшифровать часть ${index + 1} после 3 попыток: ${error.message}. Аудио сохранено в этой вкладке — его можно повторить.`);
+      return false;
+    }
+  }
+
+  function enqueueMeetingSegment(blob, index) {
+    setMeetingPending((value) => value + 1);
+    meetingQueueRef.current = meetingQueueRef.current
+      .catch(() => null)
+      .then(() => processMeetingSegment(blob, index))
+      .finally(() => setMeetingPending((value) => Math.max(0, value - 1)));
+    return meetingQueueRef.current;
+  }
+
+  async function retryFailedMeetingSegment(item) {
+    setGlobalError('');
     setMeetingPending((value) => value + 1);
     try {
-      const transcription = await transcribeBlob(blob, `meeting-${index + 1}.${audioExtension(blob.type)}`);
-      setMeetingSegments((items) => [...items.filter((item) => item.index !== index), { index, text: transcription.text || '' }].sort((a, b) => a.index - b.index));
-    } catch (error) {
-      setGlobalError(`Не удалось расшифровать часть ${index + 1}: ${error.message}`);
+      await processMeetingSegment(item.blob, item.index);
     } finally {
       setMeetingPending((value) => Math.max(0, value - 1));
     }
+  }
+
+  function skipFailedMeetingSegment(index) {
+    setMeetingFailedSegments((items) => items.filter((item) => item.index !== index));
+    setGlobalError('');
   }
 
   function startMeetingSegment(stream) {
@@ -272,7 +342,7 @@ export default function AiAssistantPanel({ sections, projects, stages, employees
       const blob = new Blob(meetingChunksRef.current, { type: recorder.mimeType || mimeType || 'audio/webm' });
       if (meetingActiveRef.current) startMeetingSegment(stream);
       else stream.getTracks().forEach((track) => track.stop());
-      if (blob.size) processMeetingSegment(blob, segmentIndex);
+      if (blob.size) enqueueMeetingSegment(blob, segmentIndex);
     };
     recorder.start(1000);
     meetingSegmentTimeoutRef.current = setTimeout(() => {
@@ -283,6 +353,7 @@ export default function AiAssistantPanel({ sections, projects, stages, employees
   async function startMeeting() {
     setGlobalError('');
     setMeetingSegments([]);
+    setMeetingFailedSegments([]);
     setMeetingDrafts([]);
     setMeetingSummary('');
     setMeetingDecisions([]);
@@ -317,11 +388,16 @@ export default function AiAssistantPanel({ sections, projects, stages, employees
     setMeetingDrafts([]);
     const startIndex = meetingSegments.length;
     for (let index = 0; index < list.length; index += 1) {
-      await processMeetingSegment(list[index], startIndex + index);
+      setMeetingPending((value) => value + 1);
+      try {
+        await processMeetingSegment(list[index], startIndex + index);
+      } finally {
+        setMeetingPending((value) => Math.max(0, value - 1));
+      }
     }
   }
 
-  const meetingTranscript = useMemo(() => meetingSegments.map((item, index) => `[Часть ${index + 1}]\n${item.text}`).join('\n\n'), [meetingSegments]);
+  const meetingTranscript = useMemo(() => meetingSegments.map((item) => `[Часть ${item.index + 1}]\n${item.text}`).join('\n\n'), [meetingSegments]);
 
   async function extractMeetingTasks() {
     if (!meetingTranscript.trim()) return;
@@ -385,15 +461,16 @@ export default function AiAssistantPanel({ sections, projects, stages, employees
         </section>
 
         <section className="rounded-3xl border bg-white p-5 shadow-sm">
-          <div className="flex items-start gap-3"><span className="rounded-2xl bg-sky-100 p-3 text-sky-700"><AudioLines className="h-5 w-5" /></span><div><h3 className="text-lg font-bold">2. Записать встречу РНП</h3><p className="mt-1 text-sm text-slate-500">Запись автоматически делится на части по 15 минут. После встречи ИИ выделит решения и черновики задач.</p></div></div>
+          <div className="flex items-start gap-3"><span className="rounded-2xl bg-sky-100 p-3 text-sky-700"><AudioLines className="h-5 w-5" /></span><div><h3 className="text-lg font-bold">2. Записать встречу РНП</h3><p className="mt-1 text-sm text-slate-500">Запись автоматически делится на части по 10 минут и расшифровывается по очереди. При сетевой ошибке приложение повторяет запрос до 3 раз и не теряет нерасшифрованный фрагмент.</p></div></div>
           <div className="mt-4 flex flex-wrap items-center gap-3">
             {!meetingActive ? <button type="button" disabled={!health.configured} onClick={startMeeting} className="inline-flex items-center rounded-2xl bg-sky-600 px-4 py-3 text-sm font-medium text-white disabled:opacity-50"><PlayCircle className="mr-2 h-5 w-5" />Начать встречу</button> : <button type="button" onClick={stopMeeting} className="inline-flex items-center rounded-2xl bg-rose-600 px-4 py-3 text-sm font-medium text-white"><PauseCircle className="mr-2 h-5 w-5" />Завершить запись</button>}
             {meetingActive && <span className="inline-flex items-center rounded-full bg-rose-50 px-3 py-1.5 text-sm font-semibold text-rose-700"><span className="mr-2 h-2.5 w-2.5 animate-pulse rounded-full bg-rose-500" />{formatElapsed(meetingElapsed)}</span>}
             {meetingPending > 0 && <span className="inline-flex items-center text-sm text-sky-700"><Loader2 className="mr-2 h-4 w-4 animate-spin" />Расшифровывается частей: {meetingPending}</span>}
           </div>
           <label className="mt-4 flex cursor-pointer items-center justify-center rounded-2xl border-2 border-dashed border-slate-200 bg-slate-50 p-4 text-sm text-slate-600 hover:border-sky-300 hover:bg-sky-50"><FileUp className="mr-2 h-5 w-5" />Или загрузить готовые аудиофайлы<input type="file" accept="audio/*,video/*" multiple className="hidden" onChange={(event) => uploadMeetingFiles(event.target.files)} /></label>
-          <div className="mt-4 grid grid-cols-3 gap-2 text-center text-xs"><div className="rounded-xl bg-slate-50 p-3"><b className="block text-lg text-slate-900">{meetingSegments.length}</b>частей готово</div><div className="rounded-xl bg-slate-50 p-3"><b className="block text-lg text-slate-900">{meetingPending}</b>обрабатывается</div><div className="rounded-xl bg-slate-50 p-3"><b className="block text-lg text-slate-900">{meetingDrafts.length}</b>задач найдено</div></div>
-          {meetingSegments.length > 0 && !meetingActive && meetingPending === 0 && <button type="button" disabled={meetingExtracting} onClick={extractMeetingTasks} className="mt-4 inline-flex w-full items-center justify-center rounded-2xl bg-indigo-600 px-4 py-3 font-medium text-white"><WandSparkles className="mr-2 h-5 w-5" />{meetingExtracting ? 'Анализирую встречу…' : 'Выделить решения и задачи'}</button>}
+          <div className="mt-4 grid grid-cols-3 gap-2 text-center text-xs"><div className="rounded-xl bg-slate-50 p-3"><b className="block text-lg text-slate-900">{meetingSegments.length}</b>частей готово</div><div className="rounded-xl bg-slate-50 p-3"><b className="block text-lg text-slate-900">{meetingPending}</b>в очереди / обработке</div><div className="rounded-xl bg-slate-50 p-3"><b className="block text-lg text-slate-900">{meetingDrafts.length}</b>задач найдено</div></div>
+          {meetingFailedSegments.length > 0 && <div className="mt-4 space-y-2 rounded-2xl border border-amber-200 bg-amber-50 p-3"><div className="text-sm font-semibold text-amber-900">Не расшифровано частей: {meetingFailedSegments.length}. Аудио сохранено в текущей вкладке.</div>{meetingFailedSegments.map((item) => <div key={item.index} className="flex flex-col gap-2 rounded-xl bg-white p-3 text-sm sm:flex-row sm:items-center sm:justify-between"><div><b>Часть {item.index + 1}</b><div className="text-xs text-slate-500">{item.error}</div></div><div className="flex gap-2"><button type="button" disabled={meetingPending > 0} onClick={() => retryFailedMeetingSegment(item)} className="rounded-lg bg-amber-600 px-3 py-2 text-xs font-medium text-white disabled:opacity-50">Повторить</button><button type="button" disabled={meetingPending > 0} onClick={() => skipFailedMeetingSegment(item.index)} className="rounded-lg border px-3 py-2 text-xs font-medium text-slate-600 disabled:opacity-50">Пропустить</button></div></div>)}</div>}
+          {meetingSegments.length > 0 && meetingFailedSegments.length === 0 && !meetingActive && meetingPending === 0 && <button type="button" disabled={meetingExtracting} onClick={extractMeetingTasks} className="mt-4 inline-flex w-full items-center justify-center rounded-2xl bg-indigo-600 px-4 py-3 font-medium text-white"><WandSparkles className="mr-2 h-5 w-5" />{meetingExtracting ? 'Анализирую встречу…' : 'Выделить решения и задачи'}</button>}
         </section>
       </div>
 
