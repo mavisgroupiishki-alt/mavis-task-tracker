@@ -1,7 +1,12 @@
 import express from 'express';
 import multer from 'multer';
 import path from 'node:path';
+import os from 'node:os';
+import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import ffmpegPath from 'ffmpeg-static';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -14,7 +19,7 @@ const SUPABASE_URL = String(process.env.SUPABASE_URL || process.env.VITE_SUPABAS
 const SUPABASE_ANON_KEY = String(process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_PUBLISHABLE_KEY || '');
 const DB_PING_CACHE_MS = Number(process.env.DB_PING_CACHE_MS || 4 * 60 * 1000);
 let dbPingCache = { checkedAt: 0, status: 503, body: null };
-const MAX_AUDIO_BYTES = Number(process.env.MAX_AUDIO_BYTES || 200 * 1024 * 1024);
+const MAX_AUDIO_BYTES = Number(process.env.MAX_AUDIO_BYTES || 500 * 1024 * 1024);
 const AI_ALLOWED_ORIGIN = String(process.env.AI_ALLOWED_ORIGIN || '').replace(/\/$/, '');
 const RATE_WINDOW_MS = 60 * 60 * 1000;
 const RATE_LIMIT = Number(process.env.AI_RATE_LIMIT_PER_HOUR || 120);
@@ -27,13 +32,56 @@ app.use(express.json({ limit: '3mb' }));
 // Render health check must verify only that this Node service is alive.
 // It must NOT depend on Supabase, Bitrix VibeCode, or any external API.
 app.get('/healthz', (_req, res) => {
-  res.status(200).json({ ok: true, service: 'mavis-task-tracker', version: '6.2.7' });
+  res.status(200).json({ ok: true, service: 'mavis-task-tracker', version: '6.2.8' });
 });
 
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: MAX_AUDIO_BYTES, files: 1 },
 });
+
+
+// Long meeting files are written to temporary disk first, then ffmpeg splits them
+// into compact 15-minute mono MP3 fragments. This prevents 1-2 hour recordings
+// from being sent to the transcription provider as one huge request.
+const longAudioUpload = multer({
+  dest: os.tmpdir(),
+  limits: { fileSize: MAX_AUDIO_BYTES, files: 1 },
+});
+const AUDIO_SEGMENT_SECONDS = Number(process.env.AUDIO_SEGMENT_SECONDS || 15 * 60);
+const AUDIO_JOB_TTL_MS = Number(process.env.AUDIO_JOB_TTL_MS || 2 * 60 * 60 * 1000);
+const preparedAudioJobs = new Map();
+
+function runProcess(command, args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    let stderr = '';
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+      if (stderr.length > 12000) stderr = stderr.slice(-12000);
+    });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code === 0) return resolve();
+      reject(new Error(`ffmpeg завершился с кодом ${code}: ${stderr || 'нет подробностей'}`));
+    });
+  });
+}
+
+async function removePreparedAudioJob(jobId) {
+  const job = preparedAudioJobs.get(jobId);
+  if (!job) return;
+  preparedAudioJobs.delete(jobId);
+  await fs.rm(job.dir, { recursive: true, force: true }).catch(() => null);
+}
+
+const audioJobCleanupTimer = setInterval(() => {
+  const cutoff = Date.now() - AUDIO_JOB_TTL_MS;
+  for (const [jobId, job] of preparedAudioJobs.entries()) {
+    if (job.createdAt < cutoff) removePreparedAudioJob(jobId).catch(() => null);
+  }
+}, 10 * 60 * 1000);
+audioJobCleanupTimer.unref?.();
 
 
 function aiRequestGuard(req, res, next) {
@@ -220,7 +268,7 @@ app.get('/api/db-ping', async (_req, res) => {
       ok: true,
       service: 'mavis-task-tracker',
       database: 'supabase',
-      version: '6.2.7',
+      version: '6.2.8',
       checkedAt: new Date().toISOString(),
     };
     dbPingCache = { checkedAt: now, status: 200, body };
@@ -250,16 +298,97 @@ app.get('/api/ai/health', async (_req, res) => {
   }
 });
 
+
+async function transcribeAudioBuffer(buffer, mimetype, filename, language = 'ru') {
+  const form = new FormData();
+  form.append('file', new Blob([buffer], { type: mimetype || 'audio/mpeg' }), filename || 'recording.mp3');
+  form.append('language', String(language || 'ru'));
+  form.append('response_format', 'json');
+  const result = await vibeFetch('/audio/transcriptions', { method: 'POST', body: form });
+  return String(result?.text || '').trim();
+}
+
+app.post('/api/ai/prepare-meeting-audio', ensureConfigured, aiRequestGuard, longAudioUpload.single('audio'), async (req, res) => {
+  let workDir = '';
+  try {
+    if (!req.file?.path) return res.status(400).json({ error: 'Аудио/видеофайл не передан.' });
+    if (!ffmpegPath) return res.status(500).json({ error: 'ffmpeg не установлен на сервере.' });
+
+    workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mavis-rnp-'));
+    const originalExt = path.extname(req.file.originalname || '') || '.media';
+    const inputPath = path.join(workDir, `input${originalExt}`);
+    await fs.rename(req.file.path, inputPath);
+    req.file.path = '';
+
+    const outputPattern = path.join(workDir, 'segment-%03d.mp3');
+    await runProcess(ffmpegPath, [
+      '-hide_banner', '-loglevel', 'error', '-y',
+      '-i', inputPath,
+      '-vn', '-ac', '1', '-ar', '16000',
+      '-c:a', 'libmp3lame', '-b:a', '48k',
+      '-f', 'segment', '-segment_time', String(AUDIO_SEGMENT_SECONDS),
+      '-reset_timestamps', '1', outputPattern,
+    ]);
+
+    await fs.rm(inputPath, { force: true }).catch(() => null);
+    const names = (await fs.readdir(workDir))
+      .filter((name) => /^segment-\d+\.mp3$/i.test(name))
+      .sort();
+    if (!names.length) throw new Error('Не удалось разделить запись на части.');
+
+    const jobId = crypto.randomUUID();
+    preparedAudioJobs.set(jobId, {
+      dir: workDir,
+      segments: names.map((name) => path.join(workDir, name)),
+      originalName: req.file.originalname || 'meeting',
+      createdAt: Date.now(),
+    });
+    workDir = '';
+    return res.json({
+      ok: true,
+      jobId,
+      segments: names.length,
+      segmentSeconds: AUDIO_SEGMENT_SECONDS,
+      originalName: req.file.originalname || 'meeting',
+    });
+  } catch (error) {
+    console.error('prepare meeting audio error', error);
+    if (req.file?.path) await fs.rm(req.file.path, { force: true }).catch(() => null);
+    if (workDir) await fs.rm(workDir, { recursive: true, force: true }).catch(() => null);
+    return res.status(500).json({ error: error.message || 'Не удалось подготовить запись к быстрой расшифровке.' });
+  }
+});
+
+app.post('/api/ai/transcribe-prepared-segment', ensureConfigured, aiRequestGuard, async (req, res) => {
+  try {
+    const jobId = String(req.body?.jobId || '');
+    const index = Number(req.body?.index);
+    const job = preparedAudioJobs.get(jobId);
+    if (!job) return res.status(404).json({ error: 'Подготовленная запись уже недоступна. Загрузите файл заново.' });
+    if (!Number.isInteger(index) || index < 0 || index >= job.segments.length) {
+      return res.status(400).json({ error: 'Неверный номер части записи.' });
+    }
+    const buffer = await fs.readFile(job.segments[index]);
+    const text = await transcribeAudioBuffer(buffer, 'audio/mpeg', `meeting-${index + 1}.mp3`, req.body?.language || 'ru');
+    return res.json({ text, index });
+  } catch (error) {
+    console.error('prepared transcription error', error);
+    return res.status(error.status || 502).json({ error: error.message, details: error.payload || null });
+  }
+});
+
+app.post('/api/ai/cleanup-audio-job', async (req, res) => {
+  const jobId = String(req.body?.jobId || '');
+  if (jobId) await removePreparedAudioJob(jobId);
+  res.json({ ok: true });
+});
+
 app.post('/api/ai/transcribe', ensureConfigured, aiRequestGuard, upload.single('audio'), async (req, res) => {
   try {
     if (!req.file?.buffer?.length) return res.status(400).json({ error: 'Аудиофайл не передан.' });
-    const form = new FormData();
     const filename = req.file.originalname || 'recording.webm';
-    form.append('file', new Blob([req.file.buffer], { type: req.file.mimetype || 'audio/webm' }), filename);
-    form.append('language', String(req.body.language || 'ru'));
-    form.append('response_format', 'json');
-    const result = await vibeFetch('/audio/transcriptions', { method: 'POST', body: form });
-    res.json({ text: String(result?.text || '').trim() });
+    const text = await transcribeAudioBuffer(req.file.buffer, req.file.mimetype || 'audio/webm', filename, req.body.language || 'ru');
+    res.json({ text });
   } catch (error) {
     console.error('transcription error', error);
     res.status(error.status || 502).json({ error: error.message, details: error.payload || null });
