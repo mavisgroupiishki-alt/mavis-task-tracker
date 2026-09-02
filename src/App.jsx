@@ -1942,6 +1942,23 @@ export default function App() {
     }
   }
 
+
+  async function setTaskArchived(task, archived) {
+    const previous = task;
+    const updated = { ...task, archived, archived_at: archived ? new Date().toISOString() : null };
+    setTasks((items) => items.map((item) => String(item.id) === String(task.id) ? updated : item));
+    try {
+      if (supabase && isRemoteId(task.id)) {
+        const { error } = await supabase.from('tasks').update({ archived, archived_at: updated.archived_at }).eq('id', task.id);
+        if (error) throw error;
+      }
+      setMessage(archived ? `Задача «${task.title}» перемещена в архив.` : `Задача «${task.title}» восстановлена.`);
+    } catch (error) {
+      setTasks((items) => items.map((item) => String(item.id) === String(task.id) ? previous : item));
+      setMessage(`Не удалось изменить архив задачи: ${error.message}`);
+    }
+  }
+
   async function deleteTask(task) {
     const previous = tasks;
     setTasks((items) => items.filter((item) => String(item.id) !== String(task.id)));
@@ -2312,7 +2329,7 @@ export default function App() {
         <span className="flex flex-wrap gap-1">
           <button type="button" onClick={() => setTaskBacklog(task, !task.backlog)} className={`rounded-lg p-2 ${task.backlog ? 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100' : 'bg-amber-50 text-amber-800 hover:bg-amber-100'}`} title={task.backlog ? 'Вернуть только эту задачу в работу' : 'Вернуть задачу в бэклог'}>{task.backlog ? <Undo2 className="h-4 w-4" /> : <Inbox className="h-4 w-4" />}</button>
           <button type="button" onClick={() => openTaskModal(task)} className="rounded-lg bg-violet-50 p-2 text-violet-700 hover:bg-violet-100" title="Редактировать задачу"><Edit3 className="h-4 w-4" /></button>
-          <button type="button" onClick={() => deleteTask(task)} className="rounded-lg bg-rose-50 p-2 text-rose-600 hover:bg-rose-100" title="Удалить задачу"><Trash2 className="h-4 w-4" /></button>
+          <button type="button" onClick={() => setTaskArchived(task, !task.archived)} className="rounded-lg bg-slate-100 p-2 text-slate-700 hover:bg-slate-200" title={task.archived ? "Вернуть задачу из архива" : "В архив"}><Archive className="h-4 w-4" /></button><button type="button" onClick={() => deleteTask(task)} className="rounded-lg bg-rose-50 p-2 text-rose-600 hover:bg-rose-100" title="Удалить задачу"><Trash2 className="h-4 w-4" /></button>
         </span>
       </div>
     );
