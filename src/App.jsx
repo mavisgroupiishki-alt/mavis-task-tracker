@@ -3154,14 +3154,13 @@ export default function App() {
           <ModalActions onCancel={() => setIsEmployeeModalOpen(false)} onSave={saveEmployee} saveLabel={editingEmployeeId ? 'Сохранить изменения' : 'Добавить сотрудника'} />
         </Modal>
       )}
+    <MavisDragon
+      onSendMessage={(message) => {
+        console.log("MAVIS AI TASK REQUEST:", message);
+        setMessage(`AI получил запрос: ${message.slice(0, 80)}...`);
+      }}
+    />
     </div>
-
-      <MavisDragon
-        onSendMessage={(message) => {
-          console.log("MAVIS AI TASK REQUEST:", message);
-          setMessage(`AI получил запрос: ${message.slice(0, 80)}...`);
-        }}
-      />
   );
 }
 
