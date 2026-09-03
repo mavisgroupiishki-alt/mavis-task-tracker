@@ -1,0 +1,5 @@
+1. Сначала распакуйте архив.
+2. Загружайте в GitHub СОДЕРЖИМОЕ распакованной папки, а не ZIP-файл.
+3. package.json, index.html, render.yaml и папка src должны лежать в корне репозитория.
+4. Перед обновлением интерфейса выполните SQL-файл supabase_v6_1_admin_and_employee_choice.sql.
+5. После Commit changes запустите Render → Manual Deploy → Deploy latest commit.

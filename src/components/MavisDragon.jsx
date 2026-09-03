@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 
 const TASK_STATUSES = ['Ожидает', 'Новая', 'В работе', 'На проверке', 'Блокер', 'Готово'];
 const PRIORITIES = ['Низкий', 'Средний', 'Высокий'];
@@ -180,8 +180,28 @@ function splitInputToLines(raw) {
     .filter(Boolean);
 }
 
+
+function PinkDragon({ className = '' }) {
+  return (
+    <svg viewBox="0 0 120 120" className={className} aria-label="Mavis dragon">
+      <defs>
+        <linearGradient id="mavisDragonPink" x1="0" x2="1">
+          <stop offset="0" stopColor="#f9a8d4" />
+          <stop offset="1" stopColor="#c084fc" />
+        </linearGradient>
+      </defs>
+      <path d="M25 70c-10-20 5-45 30-45 25 0 40 15 38 38-2 28-25 39-48 30-9-3-15-12-20-23z" fill="url(#mavisDragonPink)"/>
+      <path d="M35 40 18 22c-5 22 4 31 17 32M85 40l17-18c5 22-4 31-17 32" fill="#fbcfe8"/>
+      <circle cx="48" cy="57" r="5" fill="#1f2937"/><circle cx="73" cy="57" r="5" fill="#1f2937"/>
+      <path d="M50 76c10 8 22 8 31 0" fill="none" stroke="#7c3aed" strokeWidth="5" strokeLinecap="round"/>
+      <circle cx="43" cy="69" r="5" fill="#fb7185"/><circle cx="78" cy="69" r="5" fill="#fb7185"/>
+    </svg>
+  );
+}
+
 export default function MavisDragon({ sections = [], projects = [], stages = [], employees = [], currentUser = null, onCreateTasks }) {
   const [open, setOpen] = useState(false);
+  const [showGreeting, setShowGreeting] = useState(false);
   const [text, setText] = useState('');
   const [messages, setMessages] = useState([
     {
@@ -192,6 +212,27 @@ export default function MavisDragon({ sections = [], projects = [], stages = [],
   ]);
   const [sending, setSending] = useState(false);
   const textareaRef = useRef(null);
+
+  useEffect(() => {
+    const key = 'mavis_dragon_last_closed';
+    const last = Number(localStorage.getItem(key) || 0);
+    const show = () => {
+      if (!open) setShowGreeting(true);
+    };
+    const delay = setTimeout(() => {
+      if (!last || Date.now() - last >= 60 * 60 * 1000) show();
+    }, 10000);
+    const timer = setInterval(show, 60 * 60 * 1000);
+    return () => {
+      clearTimeout(delay);
+      clearInterval(timer);
+    };
+  }, [open]);
+
+  function closeGreeting() {
+    setShowGreeting(false);
+    localStorage.setItem('mavis_dragon_last_closed', String(Date.now()));
+  }
 
   const activeEmployees = useMemo(() => employees.filter((item) => item?.is_active !== false), [employees]);
   const visibleProjects = useMemo(() => projects.filter((item) => !item?.archived && !item?.backlog), [projects]);
@@ -254,29 +295,29 @@ export default function MavisDragon({ sections = [], projects = [], stages = [],
     <div className="pointer-events-none fixed bottom-5 right-5 z-[9999] flex flex-col items-end gap-3">
       {!open && (
         <>
-          <button
+          {showGreeting && <button
             type="button"
             onClick={() => setOpen(true)}
             className="pointer-events-auto max-w-[280px] rounded-3xl border border-pink-200 bg-white/95 px-4 py-3 text-left shadow-[0_18px_40px_rgba(244,114,182,0.18)] backdrop-blur"
           >
             <div className="flex items-start gap-3">
               <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-pink-200 via-fuchsia-200 to-violet-200 text-2xl shadow-inner">
-                🐲
+                <PinkDragon className="h-12 w-12" />
               </div>
               <div>
                 <div className="text-sm font-semibold text-slate-900">Привет! Я помощник Mavis</div>
                 <div className="mt-1 text-sm text-slate-600">Поставь мне задачу — я быстро создам её в системе 💕</div>
               </div>
             </div>
-          </button>
+          </button>}
 
           <button
             type="button"
-            onClick={() => setOpen(true)}
+            onClick={() => { closeGreeting(); setOpen(true); }}
             className="pointer-events-auto flex h-16 w-16 items-center justify-center rounded-full bg-gradient-to-br from-pink-400 via-fuchsia-400 to-violet-500 text-3xl shadow-[0_18px_40px_rgba(192,132,252,0.35)] transition hover:scale-105"
             title="Mavis AI помощник"
           >
-            🐲
+            <PinkDragon className="h-12 w-12" />
           </button>
         </>
       )}
@@ -286,7 +327,7 @@ export default function MavisDragon({ sections = [], projects = [], stages = [],
           <div className="flex items-center justify-between border-b border-pink-100 bg-gradient-to-r from-pink-50 via-rose-50 to-violet-50 px-5 py-4">
             <div className="flex items-center gap-3">
               <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-pink-300 via-fuchsia-300 to-violet-300 text-2xl shadow-inner">
-                🐲
+                <PinkDragon className="h-12 w-12" />
               </div>
               <div>
                 <div className="text-xl font-semibold text-slate-900">Mavis AI помощник</div>
