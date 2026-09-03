@@ -1974,6 +1974,41 @@ export default function App() {
     }
   }
 
+
+  async function setStageArchive(stage, archived = true) {
+    const updated = { ...stage, archived, archived_at: archived ? new Date().toISOString() : null };
+    setStages((items) => items.map((item) => String(item.id) === String(stage.id) ? updated : item));
+    try {
+      if (supabase && isRemoteId(stage.id)) {
+        const { error } = await supabase.from('project_stages').update({
+          archived,
+          archived_at: updated.archived_at
+        }).eq('id', stage.id);
+        if (error) throw error;
+      }
+      setMessage(archived ? `Этап «${stage.title}» перемещен в архив.` : `Этап «${stage.title}» восстановлен.`);
+    } catch (error) {
+      setMessage(`Не удалось изменить архив этапа: ${error.message}`);
+    }
+  }
+
+  async function setStageBacklog(stage, backlog = true) {
+    const updated = { ...stage, backlog, backlog_at: backlog ? new Date().toISOString() : null };
+    setStages((items) => items.map((item) => String(item.id) === String(stage.id) ? updated : item));
+    try {
+      if (supabase && isRemoteId(stage.id)) {
+        const { error } = await supabase.from('project_stages').update({
+          backlog,
+          backlog_at: updated.backlog_at
+        }).eq('id', stage.id);
+        if (error) throw error;
+      }
+      setMessage(backlog ? `Этап «${stage.title}» отправлен в бэклог.` : `Этап «${stage.title}» возвращен.`);
+    } catch (error) {
+      setMessage(`Не удалось изменить бэклог этапа: ${error.message}`);
+    }
+  }
+
   async function deleteStage(stage) {
     const stageTasks = tasks.filter((task) => String(task.stage_id) === String(stage.id));
     if (stageTasks.length) {
@@ -2378,7 +2413,7 @@ export default function App() {
                         <span className="min-w-0 flex-1"><span className="flex flex-wrap items-center gap-2"><b>{stage.sort_order}. {stage.title}</b><span className={`rounded-full px-2.5 py-1 text-xs ${statusStyle(stageStatus)}`}>{stageStatus}</span></span><span className="mt-1 block max-w-md"><ProgressBar value={stageProgress} color={project.color} /></span></span>
                         {stageExpanded ? <ChevronUp className="h-4 w-4 text-slate-400" /> : <ChevronDown className="h-4 w-4 text-slate-400" />}
                       </button>
-                      <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600"><span className="rounded-lg bg-white px-2.5 py-1.5">{stage.owner || 'Без ответственного'}</span><span className="rounded-lg bg-white px-2.5 py-1.5">{stage.deadline ? formatDate(stage.deadline) : 'Без срока'}</span><span className="rounded-lg bg-white px-2.5 py-1.5">{stageTasks.length} задач</span><button type="button" onClick={() => openTaskModal(null, project.id, stage.id)} className="inline-flex items-center rounded-lg bg-violet-600 px-3 py-1.5 font-medium text-white hover:bg-violet-500"><Plus className="mr-1 h-3.5 w-3.5" />Задача</button><button type="button" onClick={() => openStageModal(project.id, stage)} className="rounded-lg bg-white p-1.5 hover:bg-slate-100" title="Редактировать этап"><Edit3 className="h-3.5 w-3.5" /></button><button type="button" onClick={() => deleteStage(stage)} className="rounded-lg bg-white p-1.5 text-rose-600 hover:bg-rose-50" title="Удалить этап"><Trash2 className="h-3.5 w-3.5" /></button></div>
+                      <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600"><span className="rounded-lg bg-white px-2.5 py-1.5">{stage.owner || 'Без ответственного'}</span><span className="rounded-lg bg-white px-2.5 py-1.5">{stage.deadline ? formatDate(stage.deadline) : 'Без срока'}</span><span className="rounded-lg bg-white px-2.5 py-1.5">{stageTasks.length} задач</span><button type="button" onClick={() => openTaskModal(null, project.id, stage.id)} className="inline-flex items-center rounded-lg bg-violet-600 px-3 py-1.5 font-medium text-white hover:bg-violet-500"><Plus className="mr-1 h-3.5 w-3.5" />Задача</button><button type="button" onClick={() => setStageBacklog(stage, !stage.backlog)} className="rounded-lg bg-amber-50 p-1.5 text-amber-700 hover:bg-amber-100" title="Бэклог этапа"><Archive className="h-3.5 w-3.5" /></button><button type="button" onClick={() => setStageArchive(stage, !stage.archived)} className="rounded-lg bg-slate-100 p-1.5 text-slate-700 hover:bg-slate-200" title="Архив этапа"><Archive className="h-3.5 w-3.5" /></button><button type="button" onClick={() => openStageModal(project.id, stage)} className="rounded-lg bg-white p-1.5 hover:bg-slate-100" title="Редактировать этап"><Edit3 className="h-3.5 w-3.5" /></button><button type="button" onClick={() => deleteStage(stage)} className="rounded-lg bg-white p-1.5 text-rose-600 hover:bg-rose-50" title="Удалить этап"><Trash2 className="h-3.5 w-3.5" /></button></div>
                     </div>
                     {stageExpanded && <div className="border-t bg-white"><div className="hidden grid-cols-[minmax(260px,2fr)_130px_135px_150px_minmax(180px,1fr)_155px] gap-3 border-b bg-slate-50 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-slate-500 lg:grid"><span>Задача</span><span>Дедлайн</span><span>Ответственный</span><span>Статус</span><span>Комментарий</span><span>Действия</span></div>{stageTasks.map(renderBacklogTaskRow)}{stageTasks.length === 0 && <div className="p-5 text-center text-sm text-slate-500">В этом этапе пока нет задач.</div>}</div>}
                   </div>
