@@ -2157,6 +2157,37 @@ export default function App() {
     } catch (error) { setProjects(previous); setMessage(`Архивация отменена: ${error.message}`); }
   }
 
+
+  async function setStageArchived(stage, archived) {
+    const updated = { ...stage, archived, archived_at: archived ? new Date().toISOString() : null };
+    setStages((items) => items.map((item) => String(item.id) === String(stage.id) ? updated : item));
+    try {
+      if (supabase && isRemoteId(stage.id)) {
+        const { error } = await supabase.from('project_stages').update({ archived, archived_at: updated.archived_at }).eq('id', stage.id);
+        if (error) throw error;
+      }
+      setMessage(archived ? `Этап «${stage.title}» отправлен в архив.` : `Этап «${stage.title}» возвращён.`);
+    } catch (error) {
+      setStages((items) => items.map((item) => String(item.id) === String(stage.id) ? stage : item));
+      setMessage(`Не удалось изменить архив этапа: ${error.message}`);
+    }
+  }
+
+  async function setStageBacklog(stage, backlog) {
+    const updated = { ...stage, backlog, backlog_at: backlog ? new Date().toISOString() : null };
+    setStages((items) => items.map((item) => String(item.id) === String(stage.id) ? updated : item));
+    try {
+      if (supabase && isRemoteId(stage.id)) {
+        const { error } = await supabase.from('project_stages').update({ backlog, backlog_at: updated.backlog_at }).eq('id', stage.id);
+        if (error) throw error;
+      }
+      setMessage(backlog ? `Этап «${stage.title}» отправлен в бэклог.` : `Этап «${stage.title}» возвращён в работу.`);
+    } catch (error) {
+      setStages((items) => items.map((item) => String(item.id) === String(stage.id) ? stage : item));
+      setMessage(`Не удалось изменить бэклог этапа: ${error.message}`);
+    }
+  }
+
   async function createTemplateFromProject(project) {
     const projectStages = stages.filter((stage) => String(stage.project_id) === String(project.id)).sort((a, b) => a.sort_order - b.sort_order);
     const projectTasks = tasks.filter((task) => String(task.project_id) === String(project.id));
@@ -2461,7 +2492,7 @@ export default function App() {
                         <span className="min-w-0 flex-1"><span className="flex flex-wrap items-center gap-2"><b className="text-sm">{stage.sort_order}. {stage.title}</b><span className={`rounded-full px-2 py-0.5 text-[11px] ${statusStyle(stageStatus)}`}>{stageStatus}</span></span><span className="mt-1 block max-w-md"><ProgressBar value={stageProgress} color={project.color} /></span></span>
                         {stageExpanded ? <ChevronUp className="h-4 w-4 text-slate-400" /> : <ChevronDown className="h-4 w-4 text-slate-400" />}
                       </button>
-                      <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600"><span className="rounded-lg bg-white px-2 py-1">{stage.owner}</span><span className="rounded-lg bg-white px-2 py-1">{stage.deadline ? formatDate(stage.deadline) : 'Без срока'}</span><span className="rounded-lg bg-white px-2 py-1">{stageTasks.length} показано / {allStageTasks.length}</span><button type="button" onClick={() => openTaskModal(null, project.id, stage.id)} className="rounded-lg bg-violet-600 px-2.5 py-1 font-medium text-white">+ Задача</button><button type="button" onClick={() => openStageModal(project.id, stage)} className="rounded-lg bg-white p-1.5"><Edit3 className="h-3.5 w-3.5" /></button></div>
+                      <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600"><span className="rounded-lg bg-white px-2 py-1">{stage.owner}</span><span className="rounded-lg bg-white px-2 py-1">{stage.deadline ? formatDate(stage.deadline) : 'Без срока'}</span><span className="rounded-lg bg-white px-2 py-1">{stageTasks.length} показано / {allStageTasks.length}</span><button type="button" onClick={() => openTaskModal(null, project.id, stage.id)} className="rounded-lg bg-violet-600 px-2.5 py-1 font-medium text-white">+ Задача</button><button type="button" onClick={() => setStageBacklog(stage, true)} className="rounded-lg bg-amber-50 p-1.5 text-amber-800" title="В бэклог"><Inbox className="h-3.5 w-3.5" /></button><button type="button" onClick={() => setStageArchived(stage, true)} className="rounded-lg bg-slate-100 p-1.5 text-slate-700" title="В архив"><Archive className="h-3.5 w-3.5" /></button><button type="button" onClick={() => openStageModal(project.id, stage)} className="rounded-lg bg-white p-1.5"><Edit3 className="h-3.5 w-3.5" /></button></div>
                     </div>
                     {stageExpanded && (
                       <div className="border-t bg-white">
@@ -3124,6 +3155,13 @@ export default function App() {
         </Modal>
       )}
     </div>
+
+      <MavisDragon
+        onSendMessage={(message) => {
+          console.log("MAVIS AI TASK REQUEST:", message);
+          setMessage(`AI получил запрос: ${message.slice(0, 80)}...`);
+        }}
+      />
   );
 }
 
@@ -3145,11 +3183,5 @@ function Field({ label, children, className = '' }) {
 function ModalActions({ onCancel, onSave, saveLabel }) {
   return <div className="mt-6 flex justify-end gap-2"><button type="button" onClick={onCancel} className="rounded-2xl border px-5 py-3 text-sm hover:bg-slate-50">Отмена</button><button type="button" onClick={onSave} className="rounded-2xl bg-violet-600 px-5 py-3 text-sm font-medium text-white hover:bg-violet-500">{saveLabel}</button></div>;
 
-<MavisDragon
-  onSendMessage={(message)=>{
-    console.log('MAVIS AI TASK REQUEST:', message);
-    // подключение к существующему AI обработчику
-  }}
-/>
 
 }
